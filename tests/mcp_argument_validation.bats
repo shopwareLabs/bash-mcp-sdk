@@ -3,10 +3,10 @@
 # Tests for the shared mcpserver_core argument validator:
 #   validate_tool_arguments() and its wiring into handle_tools_call().
 # Enforces `required` always, `additionalProperties: false` when declared,
-# a declared `type`, a declared `pattern` (string values), a declared array
-# `items.type`/`items.enum` (each element), and `enum` on any property
-# present in the call's arguments. Diagnostic precedence is missing > unknown
-# > type > pattern > items > enum.
+# a declared `type` — one name or a list of alternatives — a declared
+# `pattern` (string values), a declared array `items.type`/`items.enum` (each
+# element), and `enum` on any property present in the call's arguments.
+# Diagnostic precedence is missing > unknown > type > pattern > items > enum.
 # Sources lib/mcpserver_core.sh directly. Consumers vendor that file verbatim, so
 # this suite covers the validator wherever it is vendored.
 bats_require_minimum_version 1.11.0
@@ -27,6 +27,11 @@ setup() {
     #   typed  — type/pattern/items coverage: name (string+pattern), count
     #            (integer), active (boolean), tags (array of string, each
     #            enum-constrained)
+    #   union  — list-form `type` coverage: count (integer or string), choice
+    #            (single-member list plus an enum, for precedence), values
+    #            (array whose items.type is a list)
+    #   malformed — `type` lists that declare nothing enforceable: empty, and
+    #            one carrying a non-string member
     cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
 {
   "tools": [
@@ -60,6 +65,29 @@ setup() {
           "count": {"type": "integer"},
           "active": {"type": "boolean"},
           "tags": {"type": "array", "items": {"type": "string", "enum": ["a", "b", "c"]}}
+        }
+      }
+    },
+    {
+      "name": "union",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "count": {"type": ["integer", "string"]},
+          "choice": {"type": ["string"], "enum": ["a", "b"]},
+          "values": {"type": "array", "items": {"type": ["integer", "string"]}}
+        }
+      }
+    },
+    {
+      "name": "malformed",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "empty": {"type": []},
+          "mixed": {"type": ["string", 7]},
+          "emptyitems": {"type": "array", "items": {"type": []}},
+          "mixeditems": {"type": "array", "items": {"type": ["string", 7]}}
         }
       }
     }
@@ -312,6 +340,106 @@ JSON
     # fixtures (no type/pattern/items declared on their properties beyond
     # what earlier tests already cover) still behave exactly as before.
     run validate_tool_arguments "strict" '{"number": "5", "repo": "a/b", "mode": "production"}'
+    assert_success
+    assert_output ""
+}
+
+# --- validate_tool_arguments: a `type` declared as a list of alternatives ---
+
+# JSON Schema allows `"type": ["integer", "string"]` to mean "either". The
+# validator once read the list form as "no type constraint" — the guard that
+# selected a property for type checking required `type` to be a string, so an
+# array-valued `type` dropped the property before any comparison ran, and
+# every value passed. `items.type` carried the identical guard.
+
+@test "validate_tool_arguments: a union type accepts a value matching its integer member" {
+    run validate_tool_arguments "union" '{"count": 5}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a union type accepts a value matching its string member" {
+    run validate_tool_arguments "union" '{"count": "5"}'
+    assert_success
+    assert_output ""
+}
+
+_assert_union_rejects() {
+    local arguments="$1" expected_actual="$2"
+    run validate_tool_arguments "union" "${arguments}"
+    assert_failure
+    assert_output --partial "Invalid type(s):"
+    assert_output --partial "count expected integer or string, got ${expected_actual}"
+}
+
+@test "validate_tool_arguments: an object outside a union type is rejected naming both alternatives" {
+    _assert_union_rejects '{"count": {"a": 1}}' 'object ({"a":1})'
+}
+
+@test "validate_tool_arguments: an array outside a union type is rejected naming both alternatives" {
+    _assert_union_rejects '{"count": [1, 2, 3]}' 'array ([1,2,3])'
+}
+
+@test "validate_tool_arguments: a null outside a union type is rejected naming both alternatives" {
+    _assert_union_rejects '{"count": null}' 'null (null)'
+}
+
+@test "validate_tool_arguments: a boolean outside a union type is rejected naming both alternatives" {
+    _assert_union_rejects '{"count": true}' 'boolean (true)'
+}
+
+@test "validate_tool_arguments: a non-integer number against a union offering integer but not number reports number (non-integer)" {
+    _assert_union_rejects '{"count": 5.5}' 'number (non-integer) (5.5)'
+}
+
+@test "validate_tool_arguments: a value outside a single-member union type fails on type, not enum" {
+    # The scalar-form counterpart above pins the same precedence. Under a list
+    # form the type check once never ran at all, so the value was reported as
+    # an enum violation instead.
+    run validate_tool_arguments "union" '{"choice": 7}'
+    assert_failure
+    assert_output --partial "Invalid type(s):"
+    assert_output --partial 'choice expected string, got number (7)'
+    refute_output --partial 'Invalid value(s)'
+}
+
+@test "validate_tool_arguments: array items declaring a union type accept every declared member" {
+    run validate_tool_arguments "union" '{"values": [1, "x"]}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an array item outside a union items type is rejected and names the index" {
+    run validate_tool_arguments "union" '{"values": [1, true]}'
+    assert_failure
+    assert_output --partial "Invalid array item(s):"
+    assert_output --partial 'values[1] expected integer or string, got boolean (true)'
+}
+
+@test "validate_tool_arguments: an empty type list is malformed and left unenforced" {
+    run validate_tool_arguments "malformed" '{"empty": true}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a type list carrying a non-string member is malformed and left unenforced" {
+    run validate_tool_arguments "malformed" '{"mixed": true}'
+    assert_success
+    assert_output ""
+}
+
+# `items.type` carries the same malformed-list guard as a property `type`, and
+# it is a separate expression in the jq program. Without these two, a
+# regression that made a malformed `items.type` reject every element would
+# leave the whole suite passing.
+@test "validate_tool_arguments: an empty items type list is malformed and leaves every element unenforced" {
+    run validate_tool_arguments "malformed" '{"emptyitems": [true, {"a": 1}]}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an items type list carrying a non-string member is malformed and leaves every element unenforced" {
+    run validate_tool_arguments "malformed" '{"mixeditems": [true, {"a": 1}]}'
     assert_success
     assert_output ""
 }
