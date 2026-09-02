@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-02
+
 ### Changed
 
 - `validate_tool_arguments` now enforces a `type` declared as a list of alternatives (`"type": ["integer", "string"]`), on a property and on `items.type` alike. It previously treated a list-valued `type` as no constraint, so any value passed. **Major**: arguments a union-typed property accepted before this change can now be rejected with `isError`. Consumers should review before bumping their pin.
