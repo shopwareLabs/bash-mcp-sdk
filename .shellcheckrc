@@ -1,0 +1,6 @@
+source-path=SCRIPTDIR
+external-sources=true
+# Sources use computed paths (${REPO_ROOT}, ${BATS_TEST_DIRNAME}).
+# Shellcheck strips a single expansion and resolves to ./file.sh, which misses.
+# set -euo pipefail makes missing-source failures loud at runtime.
+disable=SC1091

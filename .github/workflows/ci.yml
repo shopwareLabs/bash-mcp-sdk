@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  bash:
+    name: Bash Tests & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Install ShellCheck
+        run: |
+          SHELLCHECK_VERSION="v0.11.0"
+          ARCH=$(uname -m)  # x86_64 or aarch64 on GitHub runners
+          wget -q "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.${ARCH}.tar.xz"
+          tar -xJf "shellcheck-${SHELLCHECK_VERSION}.linux.${ARCH}.tar.xz"
+          sudo mv "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/
+          shellcheck --version
+
+      - name: ShellCheck
+        run: |
+          find lib tests .github/scripts -type f \
+            \( -name '*.sh' -o -name '*.bats' -o -name '*.bash' \) \
+            -exec shellcheck --shell=bash --format=gcc {} +
+
+      - name: Setup BATS
+        uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # 4.0.0
+        with:
+          bats-version: 1.13.0
+          support-install: true
+          assert-install: true
+          assert-version: 2.2.4
+          detik-install: false
+          file-install: false
+          support-path: ${{ github.workspace }}/.bats/bats-support
+          assert-path: ${{ github.workspace }}/.bats/bats-assert
+
+      - name: BATS
+        run: bats --timing -r tests/
