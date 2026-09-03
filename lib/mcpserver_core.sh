@@ -68,12 +68,22 @@ create_error_response() {
     local id="$1"
     local code="$2"
     local message="$3"
+    local data="${4:-}"
 
-    jq -n -c \
-        --argjson id "$id" \
-        --argjson code "$code" \
-        --arg message "$message" \
-        '{"jsonrpc": "2.0", "id": $id, "error": {"code": $code, "message": $message}}'
+    if [[ -z "$data" ]]; then
+        jq -n -c \
+            --argjson id "$id" \
+            --argjson code "$code" \
+            --arg message "$message" \
+            '{"jsonrpc": "2.0", "id": $id, "error": {"code": $code, "message": $message}}'
+    else
+        jq -n -c \
+            --argjson id "$id" \
+            --argjson code "$code" \
+            --arg message "$message" \
+            --argjson data "$data" \
+            '{"jsonrpc": "2.0", "id": $id, "error": {"code": $code, "message": $message, "data": $data}}'
+    fi
 }
 
 handle_initialize() {

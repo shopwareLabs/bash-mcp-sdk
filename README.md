@@ -24,7 +24,7 @@ There is no install step. Copy `lib/mcpserver_core.sh` into your project and `so
 | `process_request`         | Parse and route one JSON-RPC line. Useful for testing a server.       |
 | `validate_tool_arguments` | Check a call's arguments against the tool's `inputSchema`.            |
 | `create_response`         | Build a JSON-RPC result envelope.                                     |
-| `create_error_response`   | Build a JSON-RPC error envelope.                                      |
+| `create_error_response`   | Build a JSON-RPC error envelope. Optional 4th arg `data` (JSON value) is included when non-empty. |
 | `log`                     | Append to `MCP_LOG_FILE`, and to `MCP_EXTRA_LOG_FILE` when set.       |
 
 Configured by environment variable before sourcing:

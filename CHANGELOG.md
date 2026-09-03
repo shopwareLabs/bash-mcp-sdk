@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- `create_error_response` takes an optional fourth `data` argument, a JSON value carried into the error object's `data` field. Omitted or empty, the envelope is unchanged.
+
 ## [3.0.0] - 2026-09-03
 
 ### Changed
