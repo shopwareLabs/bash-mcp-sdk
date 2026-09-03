@@ -632,6 +632,154 @@ _assert_union_rejects() {
     assert_output ""
 }
 
+# --- validate_tool_arguments: a declared integer against a large literal ---
+
+# The whole-value check ran `val == (val | floor)`, and `floor` converts its
+# input to an IEEE-754 double. At or above 2^52 = 4503599627370496 the double
+# spacing reaches 1, so `4503599627370496.5` was already whole before the
+# comparison ran and the fractional value was accepted outright — then passed
+# to the tool function with its fraction intact. The check now also reads the
+# number as jq renders it, which still carries the fraction. Each rejection
+# case at or above the threshold was accepted outright pre-change; the
+# precedence case was rejected pre-change as an out-of-range value, so only its
+# diagnostic category changes; the two small-fraction cases were rejected
+# pre-change and pin that the added conjunct did not displace the value test.
+# Every acceptance case was accepted pre-change too and pins that the added
+# conjunct rejects nothing that is an integer under JSON Schema.
+
+@test "validate_tool_arguments: a fractional literal at 2^52 where an integer is declared is rejected" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 4503599627370496.5}'
+    assert_failure
+    assert_output --partial "Invalid type(s):"
+    assert_output --partial "count expected integer, got number (non-integer) (4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: a negative fractional literal at 2^52 where an integer is declared is rejected" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": -4503599627370496.5}'
+    assert_failure
+    assert_output --partial "count expected integer, got number (non-integer) (-4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: the whole value at 2^52 satisfies a declared integer type" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 4503599627370496}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an odd whole value above 2^53 satisfies a declared integer type" {
+    # 9007199254740993 has no exact double, so a check deciding from the
+    # rounded value alone would have to guess. Reading the literal keeps it
+    # accepted.
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 9007199254740993}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a small non-integer where an integer is declared is rejected unchanged" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1.5}'
+    assert_failure
+    assert_output --partial "count expected integer, got number (non-integer) (1.5)"
+}
+
+@test "validate_tool_arguments: an exponent-rendered fraction where an integer is declared is rejected by the value test" {
+    # jq renders 1.5e-7 as "1.5E-7", which takes the exponent fallback and so
+    # reaches only the `floor` comparison. This is the case that pins that
+    # conjunct: drop it and this value is accepted.
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1.5e-7}'
+    assert_failure
+    assert_output --partial "count expected integer, got number (non-integer) (1.5E-7)"
+}
+
+@test "validate_tool_arguments: a literal written with a zero fraction satisfies a declared integer type" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1.0}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an exponent literal with no fraction satisfies a declared integer type" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1e2}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an exponent literal whose value is whole satisfies a declared integer type" {
+    # 1.5e3 is 1500 — an integer under JSON Schema even though its literal
+    # carries a fraction. jq renders it as "1.5E+3", so a rejection driven by
+    # the rendered text alone would wrongly refuse it.
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1.5e3}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a fractional literal at 2^52 against a union offering integer is rejected naming both alternatives" {
+    run validate_tool_arguments "union" '{"count": 4503599627370496.5}'
+    assert_failure
+    assert_output --partial "Invalid type(s):"
+    assert_output --partial "count expected integer or string, got number (non-integer) (4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: a fractional array element at 2^52 against an integer items type is rejected and names the index" {
+    cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
+{
+  "tools": [
+    {
+      "name": "counts",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "values": {"type": "array", "items": {"type": "integer"}}
+        }
+      }
+    }
+  ]
+}
+JSON
+    run validate_tool_arguments "counts" '{"values": [1, 4503599627370496.5]}'
+    assert_failure
+    assert_output --partial "Invalid array item(s):"
+    assert_output --partial "values[1] expected integer, got number (non-integer) (4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: a fractional array element at 2^52 against a union items type is rejected naming both alternatives" {
+    # The scalar `items.type` case above and the property-level union case each
+    # reach type_ok down a different route. This one crosses them, so a
+    # regression confined to a union-typed `items` cannot hide behind either.
+    run validate_tool_arguments "union" '{"values": [1, 4503599627370496.5]}'
+    assert_failure
+    assert_output --partial "Invalid array item(s):"
+    assert_output --partial "values[1] expected integer or string, got number (non-integer) (4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: precedence — a fractional literal at 2^52 is reported as a type defect, not a range defect" {
+    # `limit` declares integer plus minimum 1 and maximum 50, and the value
+    # violates both. Pre-change the type check could not see the fraction, so
+    # the call was reported as out of range instead.
+    run validate_tool_arguments "ranged" '{"limit": 4503599627370496.5}'
+    assert_failure
+    assert_output --partial "limit expected integer, got number (non-integer) (4503599627370496.5)"
+    refute_output --partial "Out-of-range"
+}
+
+@test "validate_tool_arguments: exponent notation does not by itself escape the fractional-literal check" {
+    # jq renders 4503599627370496.5e0 back as "4503599627370496.5" — it keeps
+    # an exponent only for a value that is an exact multiple of ten or whose
+    # magnitude is below about 1e-6 — so writing the fraction with a trailing
+    # `e0` does not reach the exponent fallback.
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 4503599627370496.5e0}'
+    assert_failure
+    assert_output --partial "count expected integer, got number (non-integer) (4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: KNOWN GAP — a fractional value below the smallest subnormal double is accepted as an integer" {
+    # Not desired behavior. A rendering that keeps an exponent falls back to
+    # the double-based verdict, and 1.5e-400 underflows to 0, which is whole.
+    # Closing this needs decimal arithmetic in jq to expand the exponent
+    # exactly. Whoever closes it inverts this test.
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1.5e-400}'
+    assert_success
+    assert_output ""
+}
+
 # --- validate_tool_arguments: arguments that are not a JSON object ---
 
 # Every schema constraint reads `$args | keys`, which errors on a non-object.

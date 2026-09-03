@@ -128,13 +128,18 @@ handle_tools_list() {
 # value is not one of the declared values. A declared `type` — on a property
 # or on `items` — is either one name or a list of alternatives, and a value
 # satisfies it by matching any member; a list that is empty or carries a
-# non-string member is malformed and left unenforced. A bound that is not a
-# number is malformed the same way, which also leaves the draft-04 boolean
-# form `"exclusiveMinimum": true` unenforced. Diagnostics take precedence in
-# that order — missing, unknown, type, pattern, range, items, enum — so
-# a value that fails more than one constraint is reported with the most
-# fundamental defect first (a type mismatch is reported before an unrelated
-# enum mismatch).
+# non-string member is malformed and left unenforced. A declared `integer` is
+# satisfied by a whole-valued number, decided from the number as jq renders it
+# and not from its double value alone, so a fractional literal at or above
+# 2^52 = 4503599627370496 is rejected instead of being read as whole; a
+# rendering that carries an exponent keeps the double-based verdict, which
+# admits a fractional value below the smallest subnormal double. A bound that
+# is not a number is malformed the same way, which also leaves the draft-04
+# boolean form `"exclusiveMinimum": true` unenforced. Diagnostics take
+# precedence in that order — missing, unknown, type, pattern, range, items,
+# enum — so a value that fails more than one constraint is reported with the
+# most fundamental defect first (a type mismatch is reported before an
+# unrelated enum mismatch).
 # A tool with no entry in the tools list, or whose entry declares no
 # inputSchema, is not validated. A jq failure is a rejection and never a skip:
 # a validator that could not evaluate its input has not validated it, and
@@ -180,10 +185,34 @@ validate_tool_arguments() {
         # comparison.
         def type_names(want):
             if (want | type) == "array" then want else [want] end;
+        # The whole-value test reads the number as jq renders it as well as its
+        # double value. `floor` converts its input to an IEEE-754 double, and at
+        # or above 2^52 = 4503599627370496 the double spacing reaches 1, so a
+        # literal such as `4503599627370496.5` is already whole as a double and
+        # `floor` cannot see the fraction the check exists to find. `tojson`
+        # renders the number from the literal jq parsed, which still carries it.
+        # `floor` is kept as a conjunct rather than replaced: it rejects, at the
+        # cost of one comparison, every non-integer whose fraction survives the
+        # conversion to a double, leaving the literal test only what the double
+        # rounded away.
+        # Known gap, not an oversight: expanding an exponent rendering exactly
+        # would mean decimal arithmetic in jq, so a rendering that keeps an
+        # exponent falls back to the double-based verdict alone. jq renders an
+        # exponent when the value is an exact multiple of ten — necessarily an
+        # integer, so no gap there — or when its magnitude is below about
+        # 1e-6, where `floor` still rejects a fraction unless the double
+        # underflows to zero. What the gap admits is therefore a fractional
+        # value smaller than the smallest subnormal double: `1.5e-400` is
+        # accepted as an integer.
         def type_ok(want; val):
             any(type_names(want)[];
                 if . == "integer" then
-                    (val | type) == "number" and (val == (val | floor))
+                    (val | type) == "number"
+                    and (val == (val | floor))
+                    and ((val | tojson) as $literal
+                         | if ($literal | test("[eE]")) then true
+                           else ($literal | test("\\.[0-9]*[1-9]") | not)
+                           end)
                 else
                     (val | type) == .
                 end);
