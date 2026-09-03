@@ -120,14 +120,18 @@ handle_tools_list() {
 # `additionalProperties: false` rejects any field not in `properties`,
 # enforces a declared `type` (string, integer, number, boolean, array,
 # object) on any present field, enforces a declared `pattern` against any
-# present string-valued field, enforces a declared array `items.type` and
+# present string-valued field, enforces declared `minimum`, `maximum`,
+# `exclusiveMinimum` and `exclusiveMaximum` bounds against any present
+# number-valued field, enforces a declared array `items.type` and
 # `items.enum` against every element of a present array-valued field, and
 # rejects any present field whose schema declares an `enum` when the supplied
 # value is not one of the declared values. A declared `type` — on a property
 # or on `items` — is either one name or a list of alternatives, and a value
 # satisfies it by matching any member; a list that is empty or carries a
-# non-string member is malformed and left unenforced. Diagnostics take
-# precedence in that order — missing, unknown, type, pattern, items, enum — so
+# non-string member is malformed and left unenforced. A bound that is not a
+# number is malformed the same way, which also leaves the draft-04 boolean
+# form `"exclusiveMinimum": true` unenforced. Diagnostics take precedence in
+# that order — missing, unknown, type, pattern, range, items, enum — so
 # a value that fails more than one constraint is reported with the most
 # fundamental defect first (a type mismatch is reported before an unrelated
 # enum mismatch).
@@ -232,6 +236,32 @@ validate_tool_arguments() {
             | {p: $p, pattern: $pat, v: $v}
           ]                                      as $invalid_pattern
         | [ $present[] | . as $p
+            | ($args[$p])                          as $v
+            # The number gate mirrors how `pattern` skips a non-string value.
+            # Where a `type` is declared, a non-number already failed the type
+            # check; where none is, a range keyword must not start rejecting
+            # strings. jq types `true` as "boolean", so a boolean is skipped
+            # here too and never coerced to 1 or 0.
+            | select(($v | type) == "number")
+            # A property absent from `properties` yields null, and `// {}`
+            # keeps the field access below valid: a property permitted by
+            # `additionalProperties` carries no bound and no offender.
+            | ($props[$p] // {})                   as $ps
+            # A malformed or absent bound is left unenforced, mirroring the
+            # malformed-`type` policy above: `select(type == "number")` yields
+            # zero outputs for an absent or non-number bound, and a
+            # zero-output expression contributes no element to the array
+            # constructor. That also leaves the JSON Schema draft-04 boolean
+            # form `"exclusiveMinimum": true` unenforced — its modifier
+            # semantics are not implemented here.
+            | ( [ ($ps.minimum          | select(type == "number") | {rel: "below minimum",              bound: ., ok: ($v >= .)}),
+                  ($ps.maximum          | select(type == "number") | {rel: "above maximum",              bound: ., ok: ($v <= .)}),
+                  ($ps.exclusiveMinimum | select(type == "number") | {rel: "not above exclusiveMinimum", bound: ., ok: ($v >  .)}),
+                  ($ps.exclusiveMaximum | select(type == "number") | {rel: "not below exclusiveMaximum", bound: ., ok: ($v <  .)}) ][] )
+            | select(.ok | not)
+            | {p: $p, rel: .rel, bound: .bound, v: $v}
+          ]                                      as $out_of_range
+        | [ $present[] | . as $p
             | ($props[$p].items // empty)         as $items
             | select($items != null)
             | ($args[$p])                          as $v
@@ -279,6 +309,10 @@ validate_tool_arguments() {
           elif ($invalid_pattern | length) > 0 then
             "Invalid value(s): " + ($invalid_pattern | map(
                 .p + "=" + (.v | tojson) + " does not match pattern " + .pattern
+              ) | join("; ")) + "."
+          elif ($out_of_range | length) > 0 then
+            "Out-of-range value(s): " + ($out_of_range | map(
+                .p + "=" + (.v | tojson) + " " + .rel + " " + (.bound | tojson)
               ) | join("; ")) + "."
           elif ($invalid_items | length) > 0 then
             "Invalid array item(s): " + ($invalid_items | map(
