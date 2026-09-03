@@ -9,6 +9,7 @@ set -euo pipefail
 : "${MCP_TOOLS_LIST_FILE:=tools.json}"
 : "${MCP_LOG_FILE:=/dev/null}"
 : "${MCP_EXTRA_LOG_FILE:=}"
+: "${MCP_LOG_STDERR:=0}"
 
 log() {
     local level="$1"
@@ -17,6 +18,7 @@ log() {
     line="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message"
     echo "$line" >> "$MCP_LOG_FILE"
     [[ -n "${MCP_EXTRA_LOG_FILE}" ]] && echo "$line" >> "$MCP_EXTRA_LOG_FILE"
+    [[ "${MCP_LOG_STDERR}" == "1" ]] && printf '%s\n' "$line" >&2
     return 0
 }
 

@@ -35,6 +35,7 @@ Configured by environment variable before sourcing:
 | `MCP_CONFIG_FILE`     | `config.json` | `protocolVersion`, `serverInfo`, `capabilities`.        |
 | `MCP_LOG_FILE`        | `/dev/null`   | Where `log` writes.                                     |
 | `MCP_EXTRA_LOG_FILE`  | unset         | Second log target; `PROJECT_ROOT` resolves a relative path. |
+| `MCP_LOG_STDERR`      | `0`           | Set to `1` to also mirror each log line to stderr.       |
 
 Methods handled: `initialize`, `tools/list`, `tools/call`, `notifications/initialized`, `ping`. Anything else returns `-32601`.
 

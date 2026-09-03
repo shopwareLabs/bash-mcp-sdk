@@ -19,7 +19,7 @@ setup() {
 }
 
 teardown() {
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE
+    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE MCP_LOG_STDERR
 }
 
 # --- _configure_extra_log_file ---
@@ -67,4 +67,42 @@ teardown() {
     run grep "single write test" "${BATS_TEST_TMPDIR}/server.log"
     assert_success
     [[ ! -f "$extra" ]]
+}
+
+# --- log() stderr mirror ---
+
+@test "log: does not mirror to stderr by default" {
+    run --separate-stderr log "INFO" "no mirror by default"
+    assert_success
+    [[ -z "$stderr" ]]
+}
+
+@test "log: does not mirror to stderr when MCP_LOG_STDERR is 0" {
+    MCP_LOG_STDERR=0
+    run --separate-stderr log "INFO" "no mirror when zero"
+    assert_success
+    [[ -z "$stderr" ]]
+}
+
+@test "log: mirrors to stderr and still writes to MCP_LOG_FILE when MCP_LOG_STDERR is 1" {
+    MCP_LOG_STDERR=1
+    run --separate-stderr log "INFO" "mirror to stderr test"
+    assert_success
+    [[ "$stderr" == *"[INFO] mirror to stderr test"* ]]
+    run grep "mirror to stderr test" "${BATS_TEST_TMPDIR}/server.log"
+    assert_success
+}
+
+@test "log: does not mirror to stderr for a non-1 value like true" {
+    MCP_LOG_STDERR=true
+    run --separate-stderr log "INFO" "no mirror for true"
+    assert_success
+    [[ -z "$stderr" ]]
+}
+
+@test "log: does not mirror to stderr for a non-1 value like 2" {
+    MCP_LOG_STDERR=2
+    run --separate-stderr log "INFO" "no mirror for two"
+    assert_success
+    [[ -z "$stderr" ]]
 }

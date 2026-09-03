@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Added
 
 - `create_error_response` takes an optional fourth `data` argument, a JSON value carried into the error object's `data` field. Omitted or empty, the envelope is unchanged.
+- `MCP_LOG_STDERR` (default `0`). Set to `1` and `log` mirrors each formatted line to stderr, on top of its existing file targets. stdout still carries only the JSON-RPC stream.
 
 ## [3.0.0] - 2026-09-03
 
