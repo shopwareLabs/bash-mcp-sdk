@@ -17,6 +17,7 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 | `lib/mcpserver_core.sh` | The SDK — the only file consumers vendor; every unprefixed function is public API (`README.md` §API) |
 | `tests/core_standalone.bats` | Pins the boundary: the file sources nothing, a server needs no other file |
 | `tests/mcp_argument_validation.bats` | Pins the validator, including its diagnostic precedence |
+| `tests/error_response.bats` | Pins the error envelope builder, including its optional `data` argument |
 | `tests/extra_log_file.bats` | Pins the logging surface (`log`, `_configure_extra_log_file`) |
 | `tests/test_helper/common_setup.bash` | `REPO_ROOT` resolution; loads bats-support and bats-assert |
 | `.github/scripts/setup-bats.sh` | One-time local BATS install into `.bats/` |
