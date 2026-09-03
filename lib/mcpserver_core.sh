@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # MCP Server Core - JSON-RPC 2.0 Protocol Handler
 # Based on Model Context Protocol specification
-# Requires: bash 4+, jq
+# Requires: bash 4+, jq 1.7+
 
 set -euo pipefail
 

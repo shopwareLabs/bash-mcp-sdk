@@ -7,7 +7,7 @@ One file, `lib/mcpserver_core.sh`. It sources nothing and depends on nothing but
 ## 📌 Requirements
 
 - Bash 4.0+
-- `jq`
+- `jq` 1.7+ — below that floor, jq parses every number to a double, so the validator's `integer` check cannot see a fraction the double rounded away.
 
 > [!NOTE]
 > macOS ships Bash 3.2. Install a current Bash (`brew install bash`) or run servers under one.
