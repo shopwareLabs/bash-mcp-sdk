@@ -124,6 +124,14 @@ find lib tests .github/scripts -type f \( -name '*.sh' -o -name '*.bats' -o -nam
 - Concurrent request handling; the server loop is strictly sequential
 - Running the tool command anywhere but the local shell. Container, VM, and remote execution are a consumer concern; this SDK dispatches to a Bash function and nothing more.
 
+### Why resources and prompts are not planned
+
+This SDK targets servers that ship inside agent plugins, such as Claude Code or Codex distributions, where Bash and jq are the only client-side requirements. Such a server runs next to a local coding agent, and that setting decides both features.
+
+Resources duplicate what the agent already has. The agent reads local files itself, and any data the server can reach (a database schema, an API response) a tool returns on demand, parameterized and fresh after every change. An attached resource is a snapshot the model cannot refresh mid-task.
+
+Prompts carry workflows to clients you do not control. A plugin has its own commands and skills for that, versioned next to the server. A server meant for broad distribution to arbitrary clients is the use case for an official SDK in a general-purpose language, not for this one.
+
 ## ⚖️ License
 
 [MIT](./LICENSE)
