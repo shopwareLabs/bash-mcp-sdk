@@ -62,7 +62,7 @@ tool_greet() {
 run_mcp_server
 ```
 
-Every `inputSchema` in `tools.json` is enforced before the tool function runs — `required`, `additionalProperties: false`, `type`, `pattern`, `enum`, and array `items.type` / `items.enum`. A `type` — on a property or on `items` — may be one name or a list of alternatives (e.g. `"type": ["integer", "string"]`). A value satisfies it by matching any member. Diagnostics report the most fundamental defect first, in that order. A tool with no `inputSchema` is dispatched unvalidated.
+Every `inputSchema` in `tools.json` is enforced before the tool function runs — `required`, `additionalProperties: false`, `type`, `pattern`, `minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum`, array `items.type` / `items.enum`, and `enum`. A `type` — on a property or on `items` — may be one name or a list of alternatives (e.g. `"type": ["integer", "string"]`). A value satisfies it by matching any member. A range bound applies only to a number-valued argument — a string, boolean, or other non-number carries no bound — and a bound that is not itself a number is left unenforced, which also covers the JSON Schema draft-04 boolean form `"exclusiveMinimum": true`. Diagnostics report the most fundamental defect first, in that order. A tool with no `inputSchema` is dispatched unvalidated.
 
 A tool that exits non-zero returns its combined output as an `isError` result rather than killing the server.
 
