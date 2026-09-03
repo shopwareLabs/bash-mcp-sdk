@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-09-03
+
 ### Changed
 
 - `validate_tool_arguments` now enforces `minimum`, `maximum`, `exclusiveMinimum` and `exclusiveMaximum` against number-valued arguments. It previously read no range keyword, so a schema declaring `minimum: 1` accepted an out-of-range value like `-1` and let it reach the tool function. **Major**: arguments that violate a declared bound now return an `isError` result instead of reaching the tool. Consumers should review every range declaration in their tools list — `minimum`, `maximum`, `exclusiveMinimum` and `exclusiveMaximum` alike — against the values their clients send before bumping their pin.
