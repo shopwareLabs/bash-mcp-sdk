@@ -16,7 +16,7 @@
 
 ## Pre-Step-1
 
-Place a new suite at `tests/<concern>.bats` and source the SDK as `${REPO_ROOT}/lib/mcpserver_core.sh`. Every change to `lib/mcpserver_core.sh` extends its suite in the same commit, and `tests/` is the only place the validator's diagnostic precedence (missing > unknown > type > pattern > items > enum) is pinned — a behavior change there needs its precedence cases updated, not just new happy paths.
+Place a new suite at `tests/<concern>.bats` and source the SDK as `${REPO_ROOT}/lib/mcpserver_core.sh`. Every change to `lib/mcpserver_core.sh` extends its suite in the same commit, and `tests/` is the only place the validator's diagnostic precedence (missing > unknown > type > pattern > range > items > enum) is pinned — a behavior change there needs its precedence cases updated, not just new happy paths.
 
 ## Pre-Step-4
 

@@ -4,9 +4,11 @@
 #   validate_tool_arguments() and its wiring into handle_tools_call().
 # Enforces `required` always, `additionalProperties: false` when declared,
 # a declared `type` — one name or a list of alternatives — a declared
-# `pattern` (string values), a declared array `items.type`/`items.enum` (each
-# element), and `enum` on any property present in the call's arguments.
-# Diagnostic precedence is missing > unknown > type > pattern > items > enum.
+# `pattern` (string values), `minimum`/`maximum`/`exclusiveMinimum`/
+# `exclusiveMaximum` (number values), a declared array `items.type`/
+# `items.enum` (each element), and `enum` on any property present in the
+# call's arguments. Diagnostic precedence is
+# missing > unknown > type > pattern > range > items > enum.
 # Sources lib/mcpserver_core.sh directly. Consumers vendor that file verbatim, so
 # this suite covers the validator wherever it is vendored.
 bats_require_minimum_version 1.11.0
@@ -32,6 +34,13 @@ setup() {
     #            (array whose items.type is a list)
     #   malformed — `type` lists that declare nothing enforceable: empty, and
     #            one carrying a non-string member
+    #   ranged — range-keyword coverage: limit (integer, minimum+maximum),
+    #            score (number, minimum), above (exclusiveMinimum), below
+    #            (exclusiveMaximum), untyped (minimum, no declared type),
+    #            plus name/tags/mode to pin range against pattern, items and
+    #            enum precedence
+    #   badrange — bounds that declare nothing enforceable: a non-number
+    #            bound, and the draft-04 boolean `exclusiveMinimum` modifier
     cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
 {
   "tools": [
@@ -90,6 +99,32 @@ setup() {
           "mixeditems": {"type": "array", "items": {"type": ["string", 7]}}
         }
       }
+    },
+    {
+      "name": "ranged",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+          "score": {"type": "number", "minimum": 1},
+          "above": {"type": "number", "exclusiveMinimum": 0},
+          "below": {"type": "number", "exclusiveMaximum": 100},
+          "untyped": {"minimum": 3},
+          "name": {"type": "string", "pattern": "^[a-z]+$"},
+          "tags": {"type": "array", "items": {"type": "string"}},
+          "mode": {"enum": ["a", "b"]}
+        }
+      }
+    },
+    {
+      "name": "badrange",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "stringbound": {"minimum": "3"},
+          "draft04": {"minimum": 0, "exclusiveMinimum": true}
+        }
+      }
     }
   ]
 }
@@ -101,6 +136,7 @@ JSON
     tool_strict() { printf 'DISPATCHED:%s\n' "$1"; }
     tool_loose() { printf 'DISPATCHED:%s\n' "$1"; }
     tool_typed() { printf 'DISPATCHED:%s\n' "$1"; }
+    tool_ranged() { printf 'DISPATCHED:%s\n' "$1"; }
 }
 
 teardown() {
@@ -444,6 +480,306 @@ _assert_union_rejects() {
     assert_output ""
 }
 
+# --- validate_tool_arguments: numeric range keywords ---
+
+# The validator read no range keyword at all: `minimum`, `maximum`,
+# `exclusiveMinimum` and `exclusiveMaximum` were declared by consumer schemas
+# and never enforced, so `{"limit": -1}` against `minimum: 1` was accepted and
+# failed downstream instead. No input below produced a range diagnostic
+# pre-change: an out-of-range value was accepted outright unless the call
+# violated one of the constraints that were enforced.
+
+@test "validate_tool_arguments: a value equal to minimum is accepted" {
+    run validate_tool_arguments "ranged" '{"limit": 1}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a value equal to maximum is accepted" {
+    run validate_tool_arguments "ranged" '{"limit": 50}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a value below minimum is rejected naming property, value, and bound" {
+    run validate_tool_arguments "ranged" '{"limit": 0}'
+    assert_failure
+    assert_output "Out-of-range value(s): limit=0 below minimum 1."
+}
+
+@test "validate_tool_arguments: a value above maximum is rejected naming property, value, and bound" {
+    run validate_tool_arguments "ranged" '{"limit": 999}'
+    assert_failure
+    assert_output "Out-of-range value(s): limit=999 above maximum 50."
+}
+
+@test "validate_tool_arguments: exclusiveMinimum rejects a value equal to the bound" {
+    run validate_tool_arguments "ranged" '{"above": 0}'
+    assert_failure
+    assert_output "Out-of-range value(s): above=0 not above exclusiveMinimum 0."
+}
+
+@test "validate_tool_arguments: exclusiveMinimum accepts a value above the bound" {
+    run validate_tool_arguments "ranged" '{"above": 0.5}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: exclusiveMaximum rejects a value equal to the bound" {
+    run validate_tool_arguments "ranged" '{"below": 100}'
+    assert_failure
+    assert_output "Out-of-range value(s): below=100 not below exclusiveMaximum 100."
+}
+
+@test "validate_tool_arguments: exclusiveMaximum accepts a value below the bound" {
+    run validate_tool_arguments "ranged" '{"below": 99}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a non-integer number is checked against the bound like any other number" {
+    run validate_tool_arguments "ranged" '{"score": 0.5}'
+    assert_failure
+    assert_output --partial "score=0.5 below minimum 1"
+}
+
+@test "validate_tool_arguments: a reproduction of the reported defect — a negative value against minimum 1 is now rejected" {
+    # The originally reported defect: a consumer schema declares `minimum: 1`
+    # on a pagination or truncation limit and a caller passes -1. Previously
+    # accepted outright, then applied downstream as `per_page=-1`.
+    run validate_tool_arguments "ranged" '{"limit": -1}'
+    assert_failure
+    assert_output --partial "limit=-1 below minimum 1"
+}
+
+@test "validate_tool_arguments: a string value with minimum declared is left unenforced" {
+    # A range keyword must not start rejecting strings where no type is
+    # declared; where one is, the type check has already reported the defect.
+    run validate_tool_arguments "ranged" '{"untyped": "ab"}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a boolean value with minimum declared is left unenforced" {
+    # jq types `true` as "boolean", so the number gate skips it and no
+    # coercion to 1 or 0 happens.
+    run validate_tool_arguments "ranged" '{"untyped": true}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a number value with minimum declared and no type is still enforced" {
+    # The counterpart to the two cases above: the number gate skips other
+    # types, it does not disable the bound on the property.
+    run validate_tool_arguments "ranged" '{"untyped": 2}'
+    assert_failure
+    assert_output --partial "untyped=2 below minimum 3"
+}
+
+@test "validate_tool_arguments: a non-number bound is malformed and left unenforced" {
+    run validate_tool_arguments "badrange" '{"stringbound": 1}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: the draft-04 boolean form of exclusiveMinimum is left unenforced" {
+    # draft-04 spelled the exclusive bound as a modifier on `minimum`, so
+    # `{"minimum": 0, "exclusiveMinimum": true}` rejects 0 there. This
+    # validator implements only the numeric form, so 0 is accepted.
+    run validate_tool_arguments "badrange" '{"draft04": 0}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: two out-of-range properties in one call are both named in one message" {
+    run validate_tool_arguments "ranged" '{"above": 0, "limit": 999}'
+    assert_failure
+    assert_output "Out-of-range value(s): above=0 not above exclusiveMinimum 0; limit=999 above maximum 50."
+}
+
+@test "validate_tool_arguments: range precedence — a type violation is reported before a range violation on the same value" {
+    # 0.5 fails both: `limit` declares integer, and 0.5 is below minimum 1.
+    run validate_tool_arguments "ranged" '{"limit": 0.5}'
+    assert_failure
+    assert_output --partial "limit expected integer, got number (non-integer) (0.5)"
+    refute_output --partial "Out-of-range"
+}
+
+@test "validate_tool_arguments: range precedence — a pattern violation is reported before an unrelated range violation" {
+    run validate_tool_arguments "ranged" '{"name": "ABC", "limit": 0}'
+    assert_failure
+    assert_output --partial "does not match pattern"
+    refute_output --partial "Out-of-range"
+}
+
+@test "validate_tool_arguments: range precedence — a range violation is reported before an unrelated items violation" {
+    run validate_tool_arguments "ranged" '{"limit": 0, "tags": [7]}'
+    assert_failure
+    assert_output --partial "limit=0 below minimum 1"
+    refute_output --partial "Invalid array item(s)"
+}
+
+@test "validate_tool_arguments: range precedence — a range violation is reported before an unrelated enum violation" {
+    run validate_tool_arguments "ranged" '{"limit": 0, "mode": "z"}'
+    assert_failure
+    assert_output --partial "limit=0 below minimum 1"
+    refute_output --partial "mode="
+}
+
+@test "validate_tool_arguments: a property carrying a bound and absent from the arguments is not reported" {
+    run validate_tool_arguments "ranged" '{"name": "abc"}'
+    assert_success
+    assert_output ""
+}
+
+# --- validate_tool_arguments: a declared integer against a large literal ---
+
+# The whole-value check ran `val == (val | floor)`, and `floor` converts its
+# input to an IEEE-754 double. At or above 2^52 = 4503599627370496 the double
+# spacing reaches 1, so `4503599627370496.5` was already whole before the
+# comparison ran and the fractional value was accepted outright — then passed
+# to the tool function with its fraction intact. The check now also reads the
+# number as jq renders it, which still carries the fraction. Each rejection
+# case at or above the threshold was accepted outright pre-change; the
+# precedence case was rejected pre-change as an out-of-range value, so only its
+# diagnostic category changes; the two small-fraction cases were rejected
+# pre-change and pin that the added conjunct did not displace the value test.
+# Every acceptance case was accepted pre-change too and pins that the added
+# conjunct rejects nothing that is an integer under JSON Schema.
+
+@test "validate_tool_arguments: a fractional literal at 2^52 where an integer is declared is rejected" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 4503599627370496.5}'
+    assert_failure
+    assert_output --partial "Invalid type(s):"
+    assert_output --partial "count expected integer, got number (non-integer) (4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: a negative fractional literal at 2^52 where an integer is declared is rejected" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": -4503599627370496.5}'
+    assert_failure
+    assert_output --partial "count expected integer, got number (non-integer) (-4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: the whole value at 2^52 satisfies a declared integer type" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 4503599627370496}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an odd whole value above 2^53 satisfies a declared integer type" {
+    # 9007199254740993 has no exact double, so a check deciding from the
+    # rounded value alone would have to guess. Reading the literal keeps it
+    # accepted.
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 9007199254740993}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a small non-integer where an integer is declared is rejected unchanged" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1.5}'
+    assert_failure
+    assert_output --partial "count expected integer, got number (non-integer) (1.5)"
+}
+
+@test "validate_tool_arguments: an exponent-rendered fraction where an integer is declared is rejected by the value test" {
+    # jq renders 1.5e-7 as "1.5E-7", which takes the exponent fallback and so
+    # reaches only the `floor` comparison. This is the case that pins that
+    # conjunct: drop it and this value is accepted.
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1.5e-7}'
+    assert_failure
+    assert_output --partial "count expected integer, got number (non-integer) (1.5E-7)"
+}
+
+@test "validate_tool_arguments: a literal written with a zero fraction satisfies a declared integer type" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1.0}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an exponent literal with no fraction satisfies a declared integer type" {
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1e2}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an exponent literal whose value is whole satisfies a declared integer type" {
+    # 1.5e3 is 1500 — an integer under JSON Schema even though its literal
+    # carries a fraction. jq renders it as "1.5E+3", so a rejection driven by
+    # the rendered text alone would wrongly refuse it.
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1.5e3}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a fractional literal at 2^52 against a union offering integer is rejected naming both alternatives" {
+    run validate_tool_arguments "union" '{"count": 4503599627370496.5}'
+    assert_failure
+    assert_output --partial "Invalid type(s):"
+    assert_output --partial "count expected integer or string, got number (non-integer) (4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: a fractional array element at 2^52 against an integer items type is rejected and names the index" {
+    cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
+{
+  "tools": [
+    {
+      "name": "counts",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "values": {"type": "array", "items": {"type": "integer"}}
+        }
+      }
+    }
+  ]
+}
+JSON
+    run validate_tool_arguments "counts" '{"values": [1, 4503599627370496.5]}'
+    assert_failure
+    assert_output --partial "Invalid array item(s):"
+    assert_output --partial "values[1] expected integer, got number (non-integer) (4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: a fractional array element at 2^52 against a union items type is rejected naming both alternatives" {
+    # The scalar `items.type` case above and the property-level union case each
+    # reach type_ok down a different route. This one crosses them, so a
+    # regression confined to a union-typed `items` cannot hide behind either.
+    run validate_tool_arguments "union" '{"values": [1, 4503599627370496.5]}'
+    assert_failure
+    assert_output --partial "Invalid array item(s):"
+    assert_output --partial "values[1] expected integer or string, got number (non-integer) (4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: precedence — a fractional literal at 2^52 is reported as a type defect, not a range defect" {
+    # `limit` declares integer plus minimum 1 and maximum 50, and the value
+    # violates both. Pre-change the type check could not see the fraction, so
+    # the call was reported as out of range instead.
+    run validate_tool_arguments "ranged" '{"limit": 4503599627370496.5}'
+    assert_failure
+    assert_output --partial "limit expected integer, got number (non-integer) (4503599627370496.5)"
+    refute_output --partial "Out-of-range"
+}
+
+@test "validate_tool_arguments: exponent notation does not by itself escape the fractional-literal check" {
+    # jq renders 4503599627370496.5e0 back as "4503599627370496.5" — it keeps
+    # an exponent only for a value that is an exact multiple of ten or whose
+    # magnitude is below about 1e-6 — so writing the fraction with a trailing
+    # `e0` does not reach the exponent fallback.
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 4503599627370496.5e0}'
+    assert_failure
+    assert_output --partial "count expected integer, got number (non-integer) (4503599627370496.5)"
+}
+
+@test "validate_tool_arguments: KNOWN GAP — a fractional value below the smallest subnormal double is accepted as an integer" {
+    # Not desired behavior. A rendering that keeps an exponent falls back to
+    # the double-based verdict, and 1.5e-400 underflows to 0, which is whole.
+    # Closing this needs decimal arithmetic in jq to expand the exponent
+    # exactly. Whoever closes it inverts this test.
+    run validate_tool_arguments "typed" '{"name": "abc", "count": 1.5e-400}'
+    assert_success
+    assert_output ""
+}
+
 # --- validate_tool_arguments: arguments that are not a JSON object ---
 
 # Every schema constraint reads `$args | keys`, which errors on a non-object.
@@ -509,6 +845,16 @@ _assert_rejects_non_object() {
     assert_success
     assert_output --partial '"isError":true'
     assert_output --partial 'Invalid value(s):'
+    refute_output --partial "DISPATCHED"
+}
+
+@test "handle_tools_call: an out-of-range argument returns an isError result, not a dispatch" {
+    local params
+    params=$(jq -n -c '{name: "ranged", arguments: {limit: 999}}')
+    run handle_tools_call 1 "$params"
+    assert_success
+    assert_output --partial '"isError":true'
+    assert_output --partial "limit=999 above maximum 50"
     refute_output --partial "DISPATCHED"
 }
 
