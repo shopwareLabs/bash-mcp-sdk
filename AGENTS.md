@@ -26,7 +26,9 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 | `tests/test_helper/common_setup.bash` | `REPO_ROOT` resolution; loads bats-support and bats-assert |
 | `tests/test_helper/mcp_client.bash` | The client harness: the server's FIFO stdin, its capture files, and the per-start instance marker a suite scopes a process count with |
 | `.github/scripts/setup-bats.sh` | One-time local BATS install into `.bats/` |
-| `.github/workflows/ci.yml` | CI: ShellCheck v0.11.0 and BATS over `lib`, `tests`, `.github/scripts` |
+| `.github/workflows/ci.yml` | CI: a runner-native ShellCheck job over `lib`, `tests`, `scripts`, `.github/scripts`, and a Debian/Alpine container matrix running BATS through the script, images built with a GHCR cache |
+| `docker/` | The per-distro test images, one Dockerfile each; the base image and jq version are build args |
+| `scripts/test-linux.sh` | Runs the BATS suite in the distro containers and ShellCheck in the `koalaman/shellcheck-alpine` image, locally; CI calls it with `--no-build` |
 | `.claude/extensions/software-writer/` | Project conventions delivered to the writing-code / writing-tests / writing-docs skills |
 | `CHANGELOG.md` | Keep a Changelog record; an entry accompanies every released change |
 

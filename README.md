@@ -134,10 +134,21 @@ Consumers copy `lib/mcpserver_core.sh` into their own tree and pin the release t
 .bats/bats-core/bin/bats -r tests/
 ```
 
+Or run it in containers, which need Docker:
+
+```bash
+./scripts/test-linux.sh            # ShellCheck, then Debian and Alpine
+./scripts/test-linux.sh debian     # one distro
+```
+
+Debian is the glibc/GNU run. Alpine adds only Bash and jq to musl/busybox, so a suite that leans on a tool the dev machine happens to carry fails there.
+
+The Alpine run currently fails: busybox `ps` lacks the procps flags the test harness's liveness probe (`ps -o state= -p`) and one SDK call site (`ps -o pgid= -p`) use. Fixing that is follow-up work. The CI Alpine leg reports its result without gating merges.
+
 Lint with ShellCheck before pushing:
 
 ```bash
-find lib tests .github/scripts -type f \( -name '*.sh' -o -name '*.bats' -o -name '*.bash' \) \
+find lib tests scripts .github/scripts -type f \( -name '*.sh' -o -name '*.bats' -o -name '*.bash' \) \
   -exec shellcheck --shell=bash --format=gcc {} +
 ```
 
