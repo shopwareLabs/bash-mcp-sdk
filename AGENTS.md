@@ -16,6 +16,7 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 |---|---|
 | `lib/mcpserver_core.sh` | The SDK — the only file consumers vendor; every unprefixed function is public API (`README.md` §API) |
 | `tests/core_standalone.bats` | Pins the boundary: the file sources nothing, a server needs no other file |
+| `tests/exit_trap_isolation.bats` | Pins that `run_mcp_server`'s EXIT trap stays with the shell that runs it: a caller that isolates the call in a subshell keeps its own EXIT trap, and that subshell is where the post-loop reset of `_MCP_IN_SERVER_LOOP` is observable |
 | `tests/mcp_argument_validation.bats` | Pins the validator, including its diagnostic precedence |
 | `tests/error_response.bats` | Pins the error envelope builder, including its optional `data` argument |
 | `tests/read_json_file.bats` | Pins `read_json_file`: one JSON document per file, and the `-32603` each handler answers with when its configuration file is missing, empty, multi-document, or unparseable |
@@ -51,7 +52,7 @@ Tightening the validator is a **major** bump even though it fixes a hole: argume
 
 ## Stdout discipline
 
-Stdout carries the JSON-RPC stream. `run_mcp_server` captures each dispatch's stdout and echoes it, so only response construction writes there: `create_response`, `create_error_response`, and the deferred responses `handle_tools_call` replays for requests that arrived mid-call. Diagnostics go to `log`. `read_json_file` prints the parsed document, and every call site captures it in a command substitution, so that output never reaches the protocol stream. `validate_tool_arguments` is the one deliberate exception — it prints a human-readable message and returns 1, which `handle_tools_call` turns into an `isError` result.
+Stdout carries the JSON-RPC stream. `run_mcp_server` captures each dispatch's stdout and echoes it, so only response construction writes there: `create_response`, `create_error_response`, and the deferred responses `handle_tools_call` replays for requests that arrived mid-call. Diagnostics go to `log`. `read_json_file` prints the parsed document, and every call site captures it in a command substitution, so that output never reaches the protocol stream. `validate_tool_arguments` is the one deliberate exception — it prints a human-readable message and returns 1, which `handle_tools_call` turns into an `isError` result. `run_mcp_server` also takes over the process's EXIT trap, replacing any handler already installed, and expects to be that process's last call; a caller that needs its own EXIT trap afterwards runs the server in a subshell.
 
 ## Testing
 

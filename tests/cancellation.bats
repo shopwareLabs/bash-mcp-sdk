@@ -1025,7 +1025,10 @@ teardown() {
 @test "a direct call after run_mcp_server returns leaves the caller's stdin alone" {
     # shellcheck source=../lib/mcpserver_core.sh
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
-    run_mcp_server </dev/null
+    # run_mcp_server installs its own EXIT trap, which in this test shell would
+    # replace the one bats uses to report the test; the subshell keeps the trap
+    # bound to a shell that dies with the call.
+    ( run_mcp_server </dev/null )
     tool_after_server_loop() {
         sleep 1
         printf 'after loop done\n'

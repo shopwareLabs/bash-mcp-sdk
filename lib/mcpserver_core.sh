@@ -1364,6 +1364,9 @@ run_mcp_server() {
     # the default disposition restored so the exit status reports death by
     # signal rather than a plain zero; the EXIT trap only tears down, and a
     # teardown a signal trap already ran leaves it nothing to do.
+    # run_mcp_server takes over the process's EXIT trap, replacing any handler
+    # already installed, and expects to be that process's last call. A caller
+    # that needs its own EXIT trap afterwards runs the server in a subshell.
     trap '_server_teardown' EXIT
     trap '_mcp_teardown_on_signal INT' INT
     trap '_mcp_teardown_on_signal TERM' TERM
