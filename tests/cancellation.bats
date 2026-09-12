@@ -93,12 +93,19 @@ setup() {
     export CHILD_PID_FILE="${BATS_TEST_TMPDIR}/child.pid"
     export CANCEL_HOOK_FILE="${BATS_TEST_TMPDIR}/cancel-hook.json"
     export HOOK_CHILD_PID_FILE="${BATS_TEST_TMPDIR}/hook-child.pid"
+    # The direct handle_tools_call tests source the core and call it for tools
+    # that are not in any list. An unreadable list is a rejection now, so they
+    # get a readable empty one: unlisted tools are not validated, which is the
+    # path those tests exercised when no list was set at all. The fixture server
+    # overrides this with its own list, so only the direct calls see it.
+    export MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
+    printf '{"tools": []}\n' > "${MCP_TOOLS_LIST_FILE}"
 }
 
 teardown() {
     mcp_stop_server
     unset MCP_LOG_FILE SLOW_MARKER_FILE CHILD_PID_FILE CANCEL_HOOK_FILE \
-        HOOK_CHILD_PID_FILE SLOW_SECS
+        HOOK_CHILD_PID_FILE MCP_TOOLS_LIST_FILE SLOW_SECS
 }
 
 @test "cancelling an in-flight call kills the tool and its child, and emits no response" {
@@ -1018,7 +1025,10 @@ teardown() {
 @test "a direct call after run_mcp_server returns leaves the caller's stdin alone" {
     # shellcheck source=../lib/mcpserver_core.sh
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
-    run_mcp_server </dev/null
+    # run_mcp_server installs its own EXIT trap, which in this test shell would
+    # replace the one bats uses to report the test; the subshell keeps the trap
+    # bound to a shell that dies with the call.
+    ( run_mcp_server </dev/null )
     tool_after_server_loop() {
         sleep 1
         printf 'after loop done\n'

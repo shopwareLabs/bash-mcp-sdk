@@ -57,14 +57,27 @@ _configure_extra_log_file() {
     log "INFO" "Extra log file configured: ${MCP_EXTRA_LOG_FILE}"
 }
 
+# Read exactly one JSON document from a file and print it compact.
+# Prints nothing and returns 1 when the file is not a regular file, and when it
+# does not hold exactly one parseable document: an empty file and a file with
+# several documents both fail, because the callers hand this output to
+# `--argjson` and neither shape is one document. Never a fallback: each caller
+# answers the failure instead of treating the configuration as empty, so a
+# degraded result is not passed off as a correct one. `jq -e` is not used to
+# decide the parse — it exits 1 for a document that is `null` or `false`, both
+# of which are parseable and must pass.
 read_json_file() {
     local file="$1"
-    if [[ -f "$file" ]]; then
-        cat "$file"
-    else
+    if [[ ! -f "$file" ]]; then
         log "ERROR" "File not found: $file"
-        echo "{}"
+        return 1
     fi
+    local parsed
+    if ! parsed=$(jq -cs 'if length == 1 then .[0] else ("expected exactly one JSON document" | halt_error) end' -- "$file" 2>/dev/null); then
+        log "ERROR" "Not exactly one parseable JSON document: ${file}"
+        return 1
+    fi
+    printf '%s\n' "$parsed"
 }
 
 create_response() {
@@ -106,7 +119,10 @@ handle_initialize() {
     log "INFO" "Handling initialize request"
 
     local config
-    config=$(read_json_file "$MCP_CONFIG_FILE")
+    if ! config=$(read_json_file "$MCP_CONFIG_FILE"); then
+        create_error_response "$id" -32603 "Cannot read server configuration: ${MCP_CONFIG_FILE}"
+        return
+    fi
 
     local result
     result=$(jq -n -c \
@@ -126,7 +142,10 @@ handle_tools_list() {
     log "INFO" "Handling tools/list request"
 
     local tools_config
-    tools_config=$(read_json_file "$MCP_TOOLS_LIST_FILE")
+    if ! tools_config=$(read_json_file "$MCP_TOOLS_LIST_FILE"); then
+        create_error_response "$id" -32603 "Cannot read tools list: ${MCP_TOOLS_LIST_FILE}"
+        return
+    fi
 
     local tools
     tools=$(echo "$tools_config" | jq -c '.tools // []')
@@ -164,7 +183,9 @@ handle_tools_list() {
 # most fundamental defect first (a type mismatch is reported before an
 # unrelated enum mismatch).
 # A tool with no entry in the tools list, or whose entry declares no
-# inputSchema, is not validated. A jq failure is a rejection and never a skip:
+# inputSchema, is not validated. A tools list that cannot be read is a
+# rejection, whether it is missing or unparseable, so an unreadable list never
+# becomes a silent skip. A jq failure is a rejection and never a skip:
 # a validator that could not evaluate its input has not validated it, and
 # reporting success there would wave every constraint through. That branch is
 # defense-in-depth for a direct call rather than a live remote-input guard —
@@ -180,14 +201,24 @@ validate_tool_arguments() {
 
     local tools_config schema rc
     # errexit is off inside this function — handle_tools_call tests it in a
-    # conditional — so the unreadable-tools-list fallback must be explicit
-    # rather than left to the call site's shape.
-    tools_config=$(read_json_file "$MCP_TOOLS_LIST_FILE" 2>/dev/null) || tools_config='{}'
+    # conditional — so each failure below is handled explicitly rather than
+    # left to the call site's shape. A tools list that cannot be read is a
+    # rejection and never a skip: a validator that could not read its schemas
+    # has not validated anything, and reporting success there would wave every
+    # declared constraint through, which is how the absent-list fallback read.
+    # The jq failure below is a second such branch, kept as defense in depth
+    # for a direct call.
+    rc=0
+    tools_config=$(read_json_file "$MCP_TOOLS_LIST_FILE" 2>/dev/null) || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        printf '%s' "Cannot validate arguments for ${tool_name}: the tool list at ${MCP_TOOLS_LIST_FILE} is missing or not parseable JSON."
+        return 1
+    fi
     rc=0
     schema=$(echo "$tools_config" | jq -c --arg n "$tool_name" \
         '(.tools[]? | select(.name == $n) | .inputSchema) // empty' 2>/dev/null) || rc=$?
     if [[ $rc -ne 0 ]]; then
-        printf '%s' "Cannot validate arguments for ${tool_name}: the tool list at ${MCP_TOOLS_LIST_FILE} is not parseable JSON."
+        printf '%s' "Cannot validate arguments for ${tool_name}: the tool list at ${MCP_TOOLS_LIST_FILE} does not hold a usable tools list."
         return 1
     fi
     [[ -z "$schema" || "$schema" == "null" ]] && return 0
@@ -1333,6 +1364,9 @@ run_mcp_server() {
     # the default disposition restored so the exit status reports death by
     # signal rather than a plain zero; the EXIT trap only tears down, and a
     # teardown a signal trap already ran leaves it nothing to do.
+    # run_mcp_server takes over the process's EXIT trap, replacing any handler
+    # already installed, and expects to be that process's last call. A caller
+    # that needs its own EXIT trap afterwards runs the server in a subshell.
     trap '_server_teardown' EXIT
     trap '_mcp_teardown_on_signal INT' INT
     trap '_mcp_teardown_on_signal TERM' TERM

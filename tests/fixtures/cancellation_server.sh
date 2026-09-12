@@ -23,6 +23,7 @@ _fixture_repo_root() {
 
 FIXTURE_REPO_ROOT="$(_fixture_repo_root)"
 
+export MCP_CONFIG_FILE="${FIXTURE_REPO_ROOT}/tests/fixtures/cancellation_config.json"
 export MCP_TOOLS_LIST_FILE="${FIXTURE_REPO_ROOT}/tests/fixtures/cancellation_tools_list.json"
 export MCP_LOG_FILE="${MCP_LOG_FILE:-$(mktemp)}"
 

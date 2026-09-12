@@ -823,7 +823,31 @@ _assert_rejects_non_object() {
     printf '%s' '{"tools": [ broken' > "${MCP_TOOLS_LIST_FILE}"
     run validate_tool_arguments "strict" '{"number": "5"}'
     assert_failure
-    assert_output --partial "is not parseable JSON"
+    assert_output --partial "is missing or not parseable JSON"
+}
+
+@test "validate_tool_arguments: a missing tool list file is rejected rather than skipping validation" {
+    # Previously a missing tools list was read as "{}", so the function found no
+    # schema, skipped validation and reported success. A validator that could
+    # not read its schemas has not validated anything, so the missing file is a
+    # rejection now, on the same footing as a malformed one.
+    rm -f -- "${MCP_TOOLS_LIST_FILE}"
+    run validate_tool_arguments "strict" '{"number": "5"}'
+    assert_failure
+    assert_output --partial "Cannot validate arguments for strict"
+    assert_output --partial "is missing or not parseable JSON"
+}
+
+@test "validate_tool_arguments: a tools list that parses but is not a tools list is rejected" {
+    # read_json_file guarantees exactly one parseable document, so the retained
+    # jq-failure branch below it fires only on a document that parses but cannot
+    # be read as a tools list: `42` makes `.tools[]?` error. That branch had no
+    # coverage before this case.
+    printf '%s' '42' > "${MCP_TOOLS_LIST_FILE}"
+    run validate_tool_arguments "strict" '{"number": "5"}'
+    assert_failure
+    assert_output --partial "Cannot validate arguments for strict"
+    assert_output --partial "does not hold a usable tools list"
 }
 
 # --- handle_tools_call: wiring (validation runs before dispatch) ---
