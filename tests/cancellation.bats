@@ -10,6 +10,18 @@
 # handle_tools_call, which never reads the caller's stdin at all — the same
 # reason a tools/call replayed after an in-flight call is answered without
 # reading the stream either.
+# What a message is, its id decides: an id-carrying message whose id is a string
+# or an integer is a request, its id-less form is a notification, and a present
+# id of any other type — null, a boolean, a fractional number, an object or an
+# array — is neither, since MCP requires a request id to be a string or an
+# integer and a notification carries no id, so it is answered -32600 rather than
+# dropped. A
+# notifications/cancelled that omits requestId must not match even when the
+# in-flight id is null.
+# What a line is decides too. A line must hold exactly one JSON document: one
+# holding two answers -32700 rather than reaching the id handling, whose joined
+# id used to end the server. A document of any type passes that gate, and one
+# that is not a JSON object is answered -32600 before any field of it is read.
 # The group's liveness check must never read a `ps` scan that could not answer
 # as an empty group, which is what would drop the SIGKILL escalation.
 # A line the client sent in pieces must not withhold the response of the call
@@ -189,6 +201,261 @@ teardown() {
     assert_success
     run grep -c -- '"error"' "${MCP_SERVER_OUT}"
     assert_output "1"
+}
+
+@test "a request carrying a null id is answered -32600 rather than dropped" {
+    # MCP requires a request id to be a string or an integer and forbids null,
+    # and a notification carries no id at all, so a message with a present null
+    # id is neither: it is answered as an invalid request instead of being
+    # misread as a notification and dropped. jq's `//` conflated the two, so an
+    # absent id and a null id both arrived as null and both fell to the
+    # notification gate. 3.0.0 emitted nothing for this message, so this is a
+    # change in what reaches stdout.
+    mcp_start_server "${CANCELLATION_SERVER}"
+
+    mcp_send '{"jsonrpc":"2.0","id":null,"method":"ping"}'
+    run mcp_wait_for_response null 5
+    assert_success
+    run jq -e '.error.code == -32600 and .id == null' <<< "${output}"
+    assert_success
+}
+
+@test "a notification carrying no id is still never answered" {
+    # The companion of the null-id case above: an absent id is what makes a
+    # message a notification, so it is logged and never answered. Parsing the id
+    # by key presence leaves this form with an empty id rather than a null one,
+    # and the notification gate reads that empty sentinel. The ping is answered
+    # only because it carries an id; the id-less ping ahead of it is not.
+    mcp_start_server "${CANCELLATION_SERVER}"
+
+    mcp_send '{"jsonrpc":"2.0","method":"ping"}'
+    mcp_send '{"jsonrpc":"2.0","id":1311,"method":"ping"}'
+    run mcp_wait_for_response 1311 5
+    assert_success
+    run grep -c -- '"jsonrpc"' "${MCP_SERVER_OUT}"
+    assert_output "1"
+}
+
+@test "a request carrying a boolean id is answered -32600 rather than dispatched" {
+    # MCP requires a request id to be a string or an integer, and a notification
+    # carries no id at all, so a boolean id is neither and is answered rather
+    # than dispatched. `false` is the value jq's `//` dropped alongside the null
+    # id, so this message was one of the two silent ones and is answered now;
+    # `true` dispatched before and is answered now too. The answer carries a null
+    # id, since no valid id can be echoed back.
+    mcp_start_server "${CANCELLATION_SERVER}"
+
+    mcp_send '{"jsonrpc":"2.0","id":false,"method":"ping"}'
+    # A sentinel with a known id, answered in order after the line above, so its
+    # arrival is when the boolean-id line has already been answered.
+    mcp_send '{"jsonrpc":"2.0","id":1400,"method":"ping"}'
+    run mcp_wait_for_response 1400 5
+    assert_success
+
+    # The boolean id was answered, not dispatched: the one error line is its
+    # answer, and the one result line is the sentinel's. A dispatched boolean id
+    # would add a second result line for the one message.
+    run grep -c -- '"code":-32600' "${MCP_SERVER_OUT}"
+    assert_output "1"
+    run grep -c -- '"result"' "${MCP_SERVER_OUT}"
+    assert_output "1"
+    # And the answer echoes no valid id: the -32600 line carries a null id,
+    # where a regressed echo of the boolean would carry `false` instead.
+    run grep -c -- '"id":null,"error":{"code":-32600' "${MCP_SERVER_OUT}"
+    assert_output "1"
+}
+
+@test "a bad jsonrpc version with an invalid id answers a null id, not the invalid id" {
+    # The version arm runs ahead of the id-type gate, so it has to settle the
+    # response id on its own. JSON-RPC 2.0 §5 allows a response id to be a
+    # String, Number or Null, so a boolean id is not echoed and the arm answers
+    # with null. `false` is the value jq's `//` collapsed to null, which is why
+    # the old tree answered null here and this branch regressed to echoing it.
+    mcp_start_server "${CANCELLATION_SERVER}"
+
+    mcp_send '{"jsonrpc":"1.0","id":false,"method":"ping"}'
+    # A sentinel with a known id, answered after the line above, so its arrival
+    # is when the bad-version line has already been answered.
+    mcp_send '{"jsonrpc":"2.0","id":1500,"method":"ping"}'
+    run mcp_wait_for_response 1500 5
+    assert_success
+
+    # The one version-arm error line carries a null id; echoing the boolean
+    # would carry `false` there instead.
+    run grep -c -- '"id":null,"error":{"code":-32600' "${MCP_SERVER_OUT}"
+    assert_output "1"
+}
+
+@test "a request carrying a string id round-trips as a string" {
+    # The id is read by key presence and carried with `tojson`, so a string id
+    # keeps its JSON type across the parse: "7" is answered as the string "7",
+    # never the number 7. The pre-change `jq -c '.id // null'` rendered a
+    # present string id as a JSON string too, and the `--argjson` round trip
+    # preserved it, which is why this test passes on the pre-change tree; what
+    # `//` failed to keep apart was an absent id, a `null` id and a `false` id,
+    # all three of which it mapped to null. No other test in the suite sends a
+    # string id, so this pins the round trip the parse change rests on.
+    mcp_start_server "${CANCELLATION_SERVER}"
+
+    mcp_send '{"jsonrpc":"2.0","id":"7","method":"ping"}'
+    run mcp_wait_for_response '"7"' 5
+    assert_success
+    run jq -e '.id == "7" and (.id | type) == "string"' <<< "${output}"
+    assert_success
+}
+
+@test "a request carrying a fractional id is answered -32600 rather than dispatched" {
+    # MCP requires a request id to be a string or an integer, so a fractional
+    # id is neither a request nor a notification and is answered rather than
+    # dispatched. The gate asked only for a JSON number before, so `1.5` was a
+    # request that reached its method and was echoed back as a result. The
+    # answer carries a null id, the id the server answers with when the request's
+    # own id is not one it can echo.
+    mcp_start_server "${CANCELLATION_SERVER}"
+
+    mcp_send '{"jsonrpc":"2.0","id":1.5,"method":"ping"}'
+    # A sentinel with a known id, answered in order after the line above, so its
+    # arrival is when the fractional-id line has already been answered.
+    mcp_send '{"jsonrpc":"2.0","id":1700,"method":"ping"}'
+    run mcp_wait_for_response 1700 5
+    assert_success
+
+    # The fractional id was answered, not dispatched: the one error line is its
+    # answer, and the one result line is the sentinel's. A dispatched fractional
+    # id would add a second result line for the one message.
+    run grep -c -- '"code":-32600' "${MCP_SERVER_OUT}"
+    assert_output "1"
+    run grep -c -- '"result"' "${MCP_SERVER_OUT}"
+    assert_output "1"
+    # And the answer echoes no valid id: the -32600 line carries a null id,
+    # where a regressed dispatch would carry the fraction in a result instead.
+    run grep -c -- '"id":null,"error":{"code":-32600' "${MCP_SERVER_OUT}"
+    assert_output "1"
+}
+
+@test "a request carrying a large integer id is dispatched and round-trips unchanged" {
+    # The gate pairs a `floor` comparison with a test on the number as jq renders
+    # it, so a whole-valued id keeps passing even where the double rounds it:
+    # 9007199254740993 is 2^53 + 1, odd, and not representable as a double. The
+    # literal test reads the rendering jq parsed rather than the rounded double,
+    # so the narrowed gate does not reject a whole number the double cannot hold.
+    # This passes before and after the change; it is not a fails-first test.
+    mcp_start_server "${CANCELLATION_SERVER}"
+
+    mcp_send '{"jsonrpc":"2.0","id":9007199254740993,"method":"ping"}'
+    run mcp_wait_for_response 9007199254740993 5
+    assert_success
+    run jq -e '.id == 9007199254740993 and (.id | type) == "number"' <<< "${output}"
+    assert_success
+    # The id round-trips as the literal the client sent, not as the double it
+    # rounds to, which is what pins that the far value survives unchanged.
+    run grep -c -- '"id":9007199254740993' "${MCP_SERVER_OUT}"
+    assert_output "1"
+}
+
+@test "a line holding two JSON documents is answered -32700 and does not stop the server" {
+    # A client that omits the trailing newline on one message before writing the
+    # next produces one line holding two documents. `jq -e '.'` reported only
+    # its last output and accepted it, so the id filter emitted one line per
+    # document, the validity test read the joined two-line id as valid, and
+    # `--argjson` then rejected it; the non-zero status propagated out of
+    # process_request into run_mcp_server's plain `response=$(process_request
+    # "$line")` assignment and ended the server. The line is answered -32700
+    # instead, and the request behind it is still answered — which is what
+    # proves the server survived.
+    mcp_start_server "${CANCELLATION_SERVER}"
+
+    mcp_send '{"jsonrpc":"2.0","id":1601,"method":"ping"}{"jsonrpc":"2.0","id":1602,"method":"ping"}'
+    mcp_send '{"jsonrpc":"2.0","id":1603,"method":"ping"}'
+
+    run mcp_wait_for_response 1603 5
+    assert_success
+    run jq -e '.id == 1603 and has("result")' <<< "${output}"
+    assert_success
+
+    # The offending line is answered once, with a null id and -32700, and its
+    # message names the one-document-per-line rule rather than only "Invalid
+    # JSON". Neither of its two ids is answered: the line was rejected, not
+    # dispatched.
+    run grep -c -- '"code":-32700' "${MCP_SERVER_OUT}"
+    assert_output "1"
+    run grep -c -- 'Expected exactly one JSON document per line' "${MCP_SERVER_OUT}"
+    assert_output "1"
+    run grep -c -- '"id":1601' "${MCP_SERVER_OUT}"
+    assert_output "0"
+    run grep -c -- '"id":1602' "${MCP_SERVER_OUT}"
+    assert_output "0"
+}
+
+@test "a line that is valid JSON but not an object is answered -32600 and does not stop the server" {
+    # JSON-RPC 2.0 represents a call as a Request object, so a document of any
+    # other type is an Invalid Request. Such a line rendered an empty id from
+    # every field extraction, and create_error_response passed that empty string
+    # to --argjson, whose rejection ended the server the same way the
+    # two-document line did. It is answered -32600 with a null id instead, and
+    # the request behind it is still answered.
+    mcp_start_server "${CANCELLATION_SERVER}"
+
+    mcp_send '[1,2]'
+    mcp_send '{"jsonrpc":"2.0","id":1612,"method":"ping"}'
+
+    run mcp_wait_for_response 1612 5
+    assert_success
+    run jq -e '.id == 1612 and has("result")' <<< "${output}"
+    assert_success
+
+    run grep -c -- '"id":null,"error":{"code":-32600' "${MCP_SERVER_OUT}"
+    assert_output "1"
+}
+
+@test "a bare false document is answered -32600 rather than -32700" {
+    # `false` is valid JSON, so a parse error is the wrong code for it. The
+    # `jq -e '.'` parse gate exits non-zero on a whole document that is `null`
+    # or `false`, which is why the pre-gate tree answered -32700 for both; the
+    # gate now admits a single document of any type, and the object gate
+    # answers this one -32600, as it does every other non-object document.
+    mcp_start_server "${CANCELLATION_SERVER}"
+
+    mcp_send 'false'
+    mcp_send '{"jsonrpc":"2.0","id":1622,"method":"ping"}'
+
+    run mcp_wait_for_response 1622 5
+    assert_success
+    run jq -e '.id == 1622 and has("result")' <<< "${output}"
+    assert_success
+
+    run grep -c -- '"id":null,"error":{"code":-32600' "${MCP_SERVER_OUT}"
+    assert_output "1"
+    run grep -c -- '"code":-32700' "${MCP_SERVER_OUT}"
+    assert_output "0"
+}
+
+@test "a cancellation carrying no requestId does not cancel an in-flight call" {
+    # handle_tools_call is public API, so a consumer can drive it directly, and
+    # with the server-loop state in place it takes the same polling path a full
+    # server would. The in-flight id is null — the one value an absent requestId
+    # must not match, because jq reads the absent key as null and null == null
+    # is true, so without a presence guard this notification stops an unrelated
+    # call. Items 1-4 make a null id unreachable through process_request, so the
+    # guard has to hold on its own.
+    export SLOW_SECS=1
+    # shellcheck source=../lib/mcpserver_core.sh
+    source "${REPO_ROOT}/lib/mcpserver_core.sh"
+    tool_null_id_call() {
+        sleep "${SLOW_SECS}"
+        printf 'slow done\n'
+    }
+
+    local cancel_file="${BATS_TEST_TMPDIR}/no-requestId.line"
+    printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{}}' > "${cancel_file}"
+
+    _MCP_IN_SERVER_LOOP=1
+    local response
+    response="$(handle_tools_call null '{"name":"null_id_call","arguments":{}}' < "${cancel_file}")"
+
+    run jq -r '.result.content[0].text' <<< "${response}"
+    assert_success
+    assert_output "slow done"
 }
 
 @test "a request sent mid-call is answered after the in-flight response, in order" {
