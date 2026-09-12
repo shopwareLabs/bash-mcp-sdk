@@ -786,7 +786,17 @@ _await_tool_call() {
             buffer=""
             line=""
             if [[ -n "$fragment" ]]; then
-                if printf '%s\n' "$fragment" | jq -e '.' >/dev/null 2>&1; then
+                # The parse test is `jq empty`, which exits zero on any
+                # parseable input: `jq -e '.'` set its status from the
+                # truthiness of the output, so a fragment of `false` or `null`
+                # — both valid JSON — read as a parse failure and was dropped.
+                # `jq empty` also exits zero on input holding no documents, the
+                # empty string and whitespace-only input alike, so the fragment
+                # reaching this gate need not hold one: the `-n` guard above
+                # excludes only the empty string, and a whitespace-only
+                # fragment is handed on and answered -32700 — the same answer
+                # the same bytes get when a newline follows them.
+                if printf '%s\n' "$fragment" | jq empty >/dev/null 2>&1; then
                     line="$fragment"
                     line_ready=1
                 else
@@ -1502,7 +1512,17 @@ run_mcp_server() {
             local eof_fragment
             eof_fragment="${partial}${line}"
             partial=""
-            if ! printf '%s\n' "$eof_fragment" | jq -e '.' >/dev/null 2>&1; then
+            # The parse test is `jq empty`, which exits zero on any parseable
+            # input: `jq -e '.'` set its status from the truthiness of the
+            # output, so a fragment of `false` or `null` — both valid JSON —
+            # read as a parse failure and was dropped. `jq empty` also exits
+            # zero on input holding no documents, the empty string and
+            # whitespace-only input alike, so the joined fragment need not hold
+            # one: the branch's `-n "$partial"` guard excludes only the empty
+            # string, and a whitespace-only fragment is handed on and answered
+            # -32700 — the same answer the same bytes get when a newline
+            # follows them.
+            if ! printf '%s\n' "$eof_fragment" | jq empty >/dev/null 2>&1; then
                 log "WARN" "Discarding a partial line of ${#eof_fragment} characters left by EOF"
                 break
             fi

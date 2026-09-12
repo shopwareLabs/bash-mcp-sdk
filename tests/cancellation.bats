@@ -1257,6 +1257,115 @@ teardown() {
     assert_success
 }
 
+@test "a bare false fragment handed to the read loop is answered, not discarded" {
+    # The handoff of the test above, with a document `jq -e '.'` reads as
+    # falsy: `false` is valid JSON, so a fragment carrying it is the client's
+    # last request and is answerable. The read loop hands the parsed line to
+    # process_request, which decides what it deserves: a non-object document is
+    # answered -32600 with a null id, the same answer the bytes get when a
+    # newline follows them.
+    export SLOW_SECS=1
+    mcp_start_server "${CANCELLATION_SERVER}"
+    mcp_send '{"jsonrpc":"2.0","id":1221,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
+
+    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    assert_success
+
+    # The wait outlasts SLOW_SECS, so the tool ends with these bytes still in
+    # the poll loop's buffer and the dispatch hands them to the read loop.
+    printf '%s' 'false' >&"${MCP_CLIENT_FD}"
+    sleep 2
+    run grep -c -- 'Handing a partial line of [0-9][0-9]* characters out of tools/call 1221 (slow) to the read loop' "${MCP_LOG_FILE}"
+    assert_output "1"
+
+    mcp_close_stdin
+
+    # The fragment is the read loop's last line: it dispatches it, then stops.
+    # The exit is what orders that answer ahead of the assertions below, since
+    # its id is null and there is no response to poll for.
+    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    assert_success
+
+    # The fragment parsed, so it was dispatched rather than dropped, and its
+    # -32600 answer carries a null id.
+    run grep -c -- '"id":null,"error":{"code":-32600' "${MCP_SERVER_OUT}"
+    assert_output "1"
+    run grep -c 'Discarding a partial line' "${MCP_LOG_FILE}"
+    assert_output "0"
+}
+
+@test "a bare false sent without a trailing newline is answered when stdin closes mid-call" {
+    # The poll loop's own EOF branch, the shape that answers a client's last
+    # request written with no trailing newline: `false` is valid JSON, so it is
+    # that request rather than a fragment to drop, and it is answered behind
+    # the call's own response.
+    export SLOW_SECS=2
+    mcp_start_server "${CANCELLATION_SERVER}"
+    mcp_send '{"jsonrpc":"2.0","id":1231,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
+
+    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    assert_success
+
+    # No trailing newline, and the stream closes behind it while the tool still
+    # runs, so the poll loop holds these bytes when the EOF ends its read.
+    printf '%s' 'false' >&"${MCP_CLIENT_FD}"
+    sleep 0.5
+    mcp_close_stdin
+
+    run mcp_wait_for_response 1231 5
+    assert_success
+    run jq -r '.result.content[0].text' <<< "${output}"
+    assert_success
+    assert_output "slow done"
+
+    # The fragment parsed, so it went behind the call's response as a replay
+    # rather than being logged as discarded, and its answer is -32600.
+    run grep -c -- '"id":null,"error":{"code":-32600' "${MCP_SERVER_OUT}"
+    assert_output "1"
+    run grep -c 'Discarding a partial line' "${MCP_LOG_FILE}"
+    assert_output "0"
+
+    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    assert_success
+}
+
+@test "a whitespace-only fragment handed to the read loop is answered, not discarded" {
+    # The handoff of the tests above, with a fragment that holds no document at
+    # all: `jq -e '.'` exits non-zero on input holding nothing to parse, so
+    # whitespace read as a parse failure and was dropped. `jq empty` exits zero
+    # on it, so the fragment is handed on to process_request, which answers a
+    # line holding no document -32700 — the same answer the bytes get when a
+    # newline follows them.
+    export SLOW_SECS=1
+    mcp_start_server "${CANCELLATION_SERVER}"
+    mcp_send '{"jsonrpc":"2.0","id":1241,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
+
+    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    assert_success
+
+    # The wait outlasts SLOW_SECS, so the tool ends with these bytes still in
+    # the poll loop's buffer and the dispatch hands them to the read loop.
+    printf '%s' '   ' >&"${MCP_CLIENT_FD}"
+    sleep 2
+    run grep -c -- 'Handing a partial line of [0-9][0-9]* characters out of tools/call 1241 (slow) to the read loop' "${MCP_LOG_FILE}"
+    assert_output "1"
+
+    mcp_close_stdin
+
+    # The fragment is the read loop's last line: it dispatches it, then stops.
+    # The exit is what orders that answer ahead of the assertions below, since
+    # its id is null and there is no response to poll for.
+    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    assert_success
+
+    # The fragment was handed on rather than dropped, and its -32700 answer
+    # carries a null id.
+    run grep -c -- '"id":null,"error":{"code":-32700' "${MCP_SERVER_OUT}"
+    assert_output "1"
+    run grep -c 'Discarding a partial line' "${MCP_LOG_FILE}"
+    assert_output "0"
+}
+
 @test "the file can be sourced twice in one shell" {
     # A consumer that sources the file from two places in one shell, or reloads
     # it after an upgrade, must not lose that shell: a second `readonly` on a
