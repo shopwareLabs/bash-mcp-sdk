@@ -189,10 +189,12 @@ handle_tools_list() {
 # a validator that could not evaluate its input has not validated it, and
 # reporting success there would wave every constraint through. That branch is
 # defense-in-depth for a direct call rather than a live remote-input guard —
-# process_request gates the whole request through `jq -e '.'`, so arguments
-# arriving over the protocol are always parseable JSON. The non-object branch
-# is NOT in that category: `null`, `false` and every other JSON scalar are
-# parseable, so a client can send them and they reach this validator.
+# process_request admits only one JSON document per line and answers anything
+# that is not a JSON object before dispatch, so arguments arriving over the
+# protocol are always parseable JSON. The non-object branch is NOT in that
+# category: `null`, `false` and every other JSON scalar are parseable, and
+# `arguments` may be any JSON value, so a client can send them and they reach
+# this validator.
 # Args: $1 = tool name, $2 = arguments JSON
 # On violation: prints a human-readable message to stdout and returns 1.
 validate_tool_arguments() {
@@ -803,8 +805,13 @@ _await_tool_call() {
             # normalizes the in-flight id, jq compares it against the
             # requestId as parsed, so 1 does not match "1" and a malformed
             # line simply fails to parse and is queued instead of matching.
+            # The requestId presence guard precedes the comparison: an absent
+            # requestId reads as null, and a null in-flight id would then equal
+            # it and cancel an unrelated call. Matched only when the key is
+            # there, so the clause fails closed for an id no other message
+            # reaches.
             if printf '%s\n' "$line" | jq -e --argjson id "$id" \
-                '.jsonrpc == "2.0" and (has("id") | not) and .method == "notifications/cancelled" and .params.requestId == $id' \
+                '.jsonrpc == "2.0" and (has("id") | not) and .method == "notifications/cancelled" and (.params | has("requestId")) and .params.requestId == $id' \
                 >/dev/null 2>&1; then
                 is_cancel=1
             fi
@@ -1070,28 +1077,101 @@ process_request() {
         _MCP_LIFELINE_FD=""
     fi
 
-    if ! echo "$request" | jq -e '.' >/dev/null 2>&1; then
+    # Parse gate: exactly one JSON document, of any type. `jq -e '.'` accepted a
+    # line holding two documents — it reports only its last output — and the id
+    # filter below then emitted one line per document, so the joined text
+    # reached `--argjson`, whose rejection ended the server. It also exits
+    # non-zero on a whole document that is `null` or `false`, both of which are
+    # parseable, which is why those two answered -32700 while every other
+    # scalar reached the version arm and answered -32600. The count is read the
+    # way read_json_file reads a file's, with `jq -cs` and a length test; a line
+    # jq cannot parse at all fails the substitution, and any other count is a
+    # line that is not one document.
+    local doc_count
+    if ! doc_count=$(printf '%s\n' "$request" | jq -cs 'length' 2>/dev/null); then
         log "ERROR" "Invalid JSON received"
         create_error_response "null" -32700 "Parse error: Invalid JSON"
         return
     fi
-
-    local jsonrpc id method params
-    jsonrpc=$(echo "$request" | jq -r '.jsonrpc // ""')
-    id=$(echo "$request" | jq -c '.id // null')
-    method=$(echo "$request" | jq -r '.method // ""')
-    params=$(echo "$request" | jq -c '.params // {}')
-
-    if [[ "$jsonrpc" != "2.0" ]]; then
-        log "ERROR" "Invalid JSON-RPC version: $jsonrpc"
-        create_error_response "$id" -32600 "Invalid Request: jsonrpc must be 2.0"
+    if [[ "$doc_count" != "1" ]]; then
+        log "ERROR" "Received a line holding ${doc_count} JSON documents; expected exactly one"
+        create_error_response "null" -32700 "Parse error: Expected exactly one JSON document per line"
         return
     fi
 
-    # JSON-RPC notifications have no id and require no response, so none of
-    # the arms below can emit one. Between requests nothing is in flight: a
+    # JSON-RPC 2.0 represents a call as a Request object, so a document of any
+    # other type is an Invalid Request. This gate runs before `.jsonrpc`, `.id`,
+    # `.method` and `.params` are read, so those extractions only ever see an
+    # object and none of them can fail. That is what makes the crash fix a
+    # property of this function rather than of its caller: process_request no
+    # longer depends on the dispatch site clearing errexit inside the command
+    # substitution. It also keeps a non-object line's `Cannot index ...` jq
+    # diagnostics off the process's stderr, unrouted through `log`.
+    if [[ "$(printf '%s\n' "$request" | jq -r 'type')" != "object" ]]; then
+        log "ERROR" "JSON-RPC request is not a JSON object"
+        create_error_response "null" -32600 "Invalid Request: expected a JSON object"
+        return
+    fi
+
+    local jsonrpc id id_is_valid method params
+    jsonrpc=$(echo "$request" | jq -r '.jsonrpc // ""')
+    # The id is read by key presence, not with `//`: that operator maps an
+    # absent key and a present null to the same output, so a request carrying
+    # `"id": null` was indistinguishable from a notification. `tojson` keeps
+    # the JSON type of a present id, so 7 stays an integer and "7" a string,
+    # and an absent key leaves the empty sentinel the notification gate reads.
+    id=$(echo "$request" | jq -r 'if has("id") then (.id | tojson) else "" end')
+    method=$(echo "$request" | jq -r '.method // ""')
+    params=$(echo "$request" | jq -c '.params // {}')
+
+    # Whether the id is of a type a response can echo back: a JSON string or
+    # integer. JSON-RPC 2.0 §5 allows a response id to be a String, Number or
+    # Null, so every other type — and the absent id, whose sentinel is the
+    # empty string — must be answered with a null id rather than reflected.
+    # Computed once here, because both the version arm below and the id-type
+    # gate read this verdict; a second test would be the same question twice.
+    #
+    # The integer test is `validate_tool_arguments`' `type_ok` test for a
+    # declared `integer`, restated for a whole document: `$id` is already the
+    # id's `tojson` rendering, so the value under test is the document jq reads
+    # rather than a sub-value. The duplication is deliberate — the validator's
+    # copy sits inside a large jq program string, and factoring the two
+    # together is a refactor with its own risk. The comment above that copy
+    # explains why a bare `floor` comparison is not enough.
+    id_is_valid=0
+    if [[ -n "$id" ]] && printf '%s\n' "$id" | jq -e '
+        (type == "string")
+        or (
+            (type == "number")
+            and (. == (. | floor))
+            and ((tojson) as $literal
+                 | if ($literal | test("[eE]")) then true
+                   else ($literal | test("\\.[0-9]*[1-9]") | not)
+                   end)
+        )' >/dev/null 2>&1; then
+        id_is_valid=1
+    fi
+
+    if [[ "$jsonrpc" != "2.0" ]]; then
+        log "ERROR" "Invalid JSON-RPC version: $jsonrpc"
+        # This arm runs ahead of the id-type gate, so it settles the response
+        # id itself: a string or integer is reflected, and the absent sentinel,
+        # a null, a boolean, a fractional number, an object or an array all
+        # answer null, which is the response id JSON-RPC reserves for an id
+        # that could not be echoed.
+        local response_id="null"
+        if [[ "$id_is_valid" == "1" ]]; then
+            response_id="$id"
+        fi
+        create_error_response "$response_id" -32600 "Invalid Request: jsonrpc must be 2.0"
+        return
+    fi
+
+    # A message with no id key is a JSON-RPC notification and requires no
+    # response, so none of the arms below can emit one. The id is empty exactly
+    # when the key is absent. Between requests nothing is in flight: a
     # cancellation that arrives here matches no call and is dropped.
-    if [[ "$id" == "null" ]]; then
+    if [[ -z "$id" ]]; then
         case "$method" in
             "notifications/initialized")
                 log "INFO" "Client initialized"
@@ -1103,6 +1183,18 @@ process_request() {
                 log "INFO" "Received notification: $method"
                 ;;
         esac
+        return
+    fi
+
+    # An id that is neither a string nor an integer is neither a request nor a
+    # notification: MCP requires a request id to be a string or an integer and
+    # forbids null, and a notification carries no id at all, so an id of any
+    # other type — including a fractional number — is answered rather than
+    # dispatched. The validity test above enforces that rule in full; its
+    # verdict is read here rather than re-run.
+    if [[ "$id_is_valid" != "1" ]]; then
+        log "ERROR" "Request id must be a string or an integer"
+        create_error_response "null" -32600 "Invalid Request: id must be a string or an integer"
         return
     fi
 
