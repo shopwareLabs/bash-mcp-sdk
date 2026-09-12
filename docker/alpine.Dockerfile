@@ -9,6 +9,9 @@ ARG JQ_VERSION=""
 RUN set -eux; \
     apk add --no-cache bash; \
     if [ -n "${JQ_VERSION}" ]; then \
+        case "${JQ_VERSION}" in \
+            v*) printf '%s\n' "JQ_VERSION must omit the leading v (for example 1.7.1)" >&2; exit 1 ;; \
+        esac; \
         arch="$(uname -m)"; \
         case "${arch}" in \
             x86_64) jq_arch="amd64" ;; \
@@ -25,4 +28,18 @@ RUN set -eux; \
         fi; \
     else \
         apk add --no-cache jq; \
+    fi; \
+    installed="$(jq --version)"; \
+    version="${installed#jq-}"; \
+    major="${version%%.*}"; \
+    minor_and_patch="${version#*.}"; \
+    case "${version}" in *.*) ;; *) printf '%s\n' "invalid jq version: ${installed}" >&2; exit 1 ;; esac; \
+    case "${minor_and_patch}" in \
+        *.*) minor="${minor_and_patch%%.*}"; patch="${minor_and_patch#*.}"; case "${patch}" in ''|*.*|*[!0-9]*) printf '%s\n' "invalid jq version: ${installed}" >&2; exit 1 ;; esac ;; \
+        *) minor="${minor_and_patch}" ;; \
+    esac; \
+    case "${major}:${minor}" in *[!0-9:]*|:*|*:) printf '%s\n' "invalid jq version: ${installed}" >&2; exit 1 ;; esac; \
+    if [ "${major}" -lt 1 ] || { [ "${major}" -eq 1 ] && [ "${minor}" -lt 7 ]; }; then \
+        printf '%s\n' "jq 1.7+ required, got ${installed}" >&2; \
+        exit 1; \
     fi

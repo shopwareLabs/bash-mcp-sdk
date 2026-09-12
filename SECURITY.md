@@ -13,7 +13,7 @@ We aim to acknowledge reports within 5 business days and will coordinate a fix a
 This section documents the security baseline for this repository, as required for legal and compliance review.
 
 **No automatic outbound network calls**
-The SDK operates locally: it reads JSON-RPC from stdin, writes responses to stdout, and invokes `jq`. It makes no outbound network calls, telemetry uploads, crash reports, or update checks. The only network access in the repository is developer-initiated and version-pinned: `.github/scripts/setup-bats.sh` clones the BATS repositories from GitHub, and CI downloads ShellCheck.
+The SDK operates locally: it reads JSON-RPC from stdin, writes responses to stdout, and invokes `jq`. It makes no outbound network calls, telemetry uploads, crash reports, or update checks. CI and `scripts/test-linux.sh` build their test images from `debian:stable-slim` (a mutable tag) and `alpine:3.22`; CI downloads the pinned ShellCheck release tarball from GitHub and reads from — on pushes to `main`, writes to — the GHCR test-image cache. A `scripts/test-linux.sh` run with no distro argument pulls `koalaman/shellcheck-alpine:v0.11.0` for its ShellCheck stage. `.github/scripts/setup-bats.sh` clones the pinned BATS releases from GitHub. When `JQ_VERSION` is set, the Dockerfiles download that upstream static jq release binary from GitHub.
 
 **No hardcoded credentials or tokens**
 The repository contains no hardcoded API keys, tokens, passwords, or credentials. No `.env` files or credential files are committed.
