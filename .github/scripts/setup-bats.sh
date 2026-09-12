@@ -27,17 +27,17 @@ mkdir -p "$BATS_DIR"
 echo "Cloning bats-core v${BATS_VERSION}..."
 git clone --depth 1 --branch "v${BATS_VERSION}" \
     https://github.com/bats-core/bats-core.git \
-    "${BATS_DIR}/bats-core" 2>/dev/null
+    "${BATS_DIR}/bats-core"
 
 echo "Cloning bats-support v${BATS_SUPPORT_VERSION}..."
 git clone --depth 1 --branch "v${BATS_SUPPORT_VERSION}" \
     https://github.com/bats-core/bats-support.git \
-    "${BATS_DIR}/bats-support" 2>/dev/null
+    "${BATS_DIR}/bats-support"
 
 echo "Cloning bats-assert v${BATS_ASSERT_VERSION}..."
 git clone --depth 1 --branch "v${BATS_ASSERT_VERSION}" \
     https://github.com/bats-core/bats-assert.git \
-    "${BATS_DIR}/bats-assert" 2>/dev/null
+    "${BATS_DIR}/bats-assert"
 
 echo ""
 echo "BATS installed successfully to ${BATS_DIR}/"

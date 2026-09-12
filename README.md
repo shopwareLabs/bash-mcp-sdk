@@ -8,8 +8,8 @@ One file, `lib/mcpserver_core.sh`. It sources nothing and needs `jq`, plus `ps` 
 
 - Bash 4.1+ — the file allocates file descriptors with `{var}` redirection, which arrived in 4.1.
 - `jq` 1.7+ — below that floor, jq parses every number to a double, so the validator's `integer` check cannot see a fraction the double rounded away.
-- `ps` and `mkfifo` — the tool lifecycle. `run_mcp_server` creates the lifeline with `mkfifo`, and the sentinel that kills a tool's process group once the server is gone reads that group's id from `ps`. Both ship with macOS and standard Linux.
-- `pgrep` (optional) — how a cancellation tells a live tool process group from an emptied one, so a tool that dies on the `SIGTERM` is reaped at once rather than after the two-second grace. macOS and standard Linux ship it. Without it a cancellation still escalates to `SIGKILL`, but it waits the whole grace first, because the fallback check counts the sentinel that guards the group.
+- `ps` and `mkfifo` — the tool lifecycle. `run_mcp_server` creates the lifeline with `mkfifo`, and the sentinel that kills a tool's process group once the server is gone reads that group's id from `ps`. Both ship with macOS and standard Linux. BusyBox `ps` lacks the flags this lifecycle needs, so Alpine consumers need procps.
+- `pgrep` (optional) — how a cancellation tells a live tool process group from an emptied one, so a tool that dies on the `SIGTERM` is reaped at once rather than after the two-second grace. macOS and standard Linux ship it. Without it a cancellation still escalates to `SIGKILL`, but it waits the whole grace first, because the fallback check counts the sentinel that guards the group. BusyBox `pgrep` lacks the needed `-g` flag, so Alpine consumers need procps.
 
 > [!NOTE]
 > macOS ships Bash 3.2. Install a current Bash (`brew install bash`) or run servers under one.
@@ -134,10 +134,25 @@ Consumers copy `lib/mcpserver_core.sh` into their own tree and pin the release t
 .bats/bats-core/bin/bats -r tests/
 ```
 
+Or run it in containers, which need Docker:
+
+```bash
+./scripts/test-linux.sh            # ShellCheck, then Debian and Alpine
+./scripts/test-linux.sh debian     # one distro: no ShellCheck, and a failure always gates
+```
+
+Set `BASE_IMAGE_DEBIAN` or `BASE_IMAGE_ALPINE` to override that build's base image; set `JQ_VERSION` to install that upstream static jq release instead of the distro package.
+
+Debian is the glibc/GNU run. Alpine adds only Bash and jq to musl/busybox, so a suite that leans on a tool the dev machine happens to carry fails there.
+
+The Alpine run currently fails. BusyBox `ps` lacks the test harness liveness probes (`ps -o state= -p` in `tests/test_helper/mcp_client.bash` and duplicates in `tests/cancellation.bats` and `tests/lifecycle.bats`) and `ps -Ao state=,args=` in `tests/lifecycle.bats`. The hardcoded `/usr/bin/true` in `tests/lifecycle.bats` fails for a different reason: Alpine has no such path. Consumer-visible SDK calls also need procps: the sentinel uses `ps -o pgid= -p` in `lib/mcpserver_core.sh`, and the cancellation path reads BusyBox `pgrep -g` usage errors as an empty group. Until those sites are fixed, BusyBox `ps` and `pgrep` are not enough for the SDK's tool lifecycle. The CI Alpine leg reports its result without gating merges.
+
+That tolerance belongs to a bare run only, because a bare run reports on both distros at once. Naming a distro asks for that distro's verdict: the ShellCheck stage is skipped, and any failure gates, Alpine included.
+
 Lint with ShellCheck before pushing:
 
 ```bash
-find lib tests .github/scripts -type f \( -name '*.sh' -o -name '*.bats' -o -name '*.bash' \) \
+find lib tests scripts .github/scripts -type f \( -name '*.sh' -o -name '*.bats' -o -name '*.bash' \) \
   -exec shellcheck --shell=bash --format=gcc {} +
 ```
 

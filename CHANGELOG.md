@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- A multi-distro test harness: `docker/` images for Debian (glibc/GNU) and Alpine (musl/busybox), `scripts/test-linux.sh` to run the BATS suite inside them and ShellCheck in the `koalaman/shellcheck-alpine` image, and a CI matrix that builds each image with a GHCR build cache. Tooling only — `lib/mcpserver_core.sh` and its consumer-facing surface are unchanged.
+
 ## [4.0.0] - 2026-09-12
 
 ### Added

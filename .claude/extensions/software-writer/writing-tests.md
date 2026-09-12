@@ -9,7 +9,7 @@
 - `tests.frameworks` =
   | Stack | Framework | Test files | Run |
   |---|---|---|---|
-  | bash | BATS — bats-core 1.13.0, bats-support 0.3.0, bats-assert 2.2.4; every file declares `bats_require_minimum_version 1.11.0` | `tests/*.bats` | `./.github/scripts/setup-bats.sh` once, then `.bats/bats-core/bin/bats -r tests/`; CI runs `bats --timing -r tests/` |
+  | bash | BATS — bats-core 1.13.0, bats-support 0.3.0, bats-assert 2.2.4; every file declares `bats_require_minimum_version 1.11.0` | `tests/*.bats` | `./.github/scripts/setup-bats.sh` once, then `.bats/bats-core/bin/bats -r tests/`; CI runs `bats --timing -r tests/` in distro containers through `scripts/test-linux.sh` |
 - `tests.fixture_sources` =
   - `tests/test_helper/common_setup.bash` — resolves `REPO_ROOT` by walking up from `BATS_TEST_DIRNAME` to the directory containing `.bats/`, then loads bats-support and bats-assert. `setup-bats.sh` must have run first: without `.bats/` the walk reaches `/` and every load fails from there.
   - Throwaway servers built in `setup()`: a `tools.json` and a `server.sh` heredoc in `BATS_TEST_TMPDIR` that exports the `MCP_*` variables, sources `${REPO_ROOT}/lib/mcpserver_core.sh`, and defines its `tool_<name>` functions — see `tests/core_standalone.bats` for the shape.

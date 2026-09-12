@@ -3,7 +3,7 @@
 - `project.stacks` =
   | Stack | Where | Toolchain |
   |---|---|---|
-  | bash | `lib/mcpserver_core.sh`, `tests/**/*.bats`, `tests/test_helper/*.bash`, `.github/scripts/` | bash 4.0+ for the SDK and its tests; bash 3.2+ for `.github/scripts/` (runs on stock macOS); `jq`; ShellCheck v0.11.0 pinned in CI |
+  | bash | `lib/mcpserver_core.sh`, `tests/**/*.bats`, `tests/test_helper/*.bash`, `scripts/`, `.github/scripts/` | bash 4.0+ for the SDK and its tests; bash 3.2+ for `.github/scripts/` (runs on stock macOS); `jq`; ShellCheck v0.11.0 pinned in CI |
 
   No other stack is in play. The whole product is one bash file; everything else in the tree tests or ships it.
 - `code.primitives` =
