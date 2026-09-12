@@ -4,7 +4,7 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 
 ## Before editing
 
-- Stdout carries the JSON-RPC stream. Anything written outside `create_response` / `create_error_response` corrupts the protocol (§Stdout discipline).
+- Stdout carries the JSON-RPC stream. Only the response path writes to it; anything else corrupts the protocol (§Stdout discipline).
 - Classify every change to a public name, argument order, or stdout shape before writing it (§Compatibility contract).
 - `lib/mcpserver_core.sh` sources nothing and serves the protocol alone (§Scope).
 - Every change to the file extends its BATS suite in the same commit (§Testing).
@@ -19,7 +19,12 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 | `tests/mcp_argument_validation.bats` | Pins the validator, including its diagnostic precedence |
 | `tests/error_response.bats` | Pins the error envelope builder, including its optional `data` argument |
 | `tests/extra_log_file.bats` | Pins the logging surface (`log`, `_configure_extra_log_file`) |
+| `tests/cancellation.bats` | Pins cancellation: the in-flight kill, the absent response, ignored cancellations, the cancel hook, tool stdin, and the EOF drain |
+| `tests/lifecycle.bats` | Pins server teardown: group and pid signals, the SIGKILL sentinel, and that no tool process outlives the server |
+| `tests/client_harness.bats` | Pins the FIFO client harness: start a server, send one line, wait for a response, assert silence, tear down |
+| `tests/fixtures/` | The fixture server (`cancellation_server.sh`) and tools list the cancellation and lifecycle suites drive over the real protocol |
 | `tests/test_helper/common_setup.bash` | `REPO_ROOT` resolution; loads bats-support and bats-assert |
+| `tests/test_helper/mcp_client.bash` | The client harness: the server's FIFO stdin, its capture files, and the per-start instance marker a suite scopes a process count with |
 | `.github/scripts/setup-bats.sh` | One-time local BATS install into `.bats/` |
 | `.github/workflows/ci.yml` | CI: ShellCheck v0.11.0 and BATS over `lib`, `tests`, `.github/scripts` |
 | `.claude/extensions/software-writer/` | Project conventions delivered to the writing-code / writing-tests / writing-docs skills |
@@ -36,14 +41,14 @@ The repository carries the MCP protocol layer and nothing else. Config discovery
 - Renaming or removing a function, or changing its argument order, is a **major** bump.
 - Changing what a function writes to stdout is a **major** bump — servers pipe that into tool results.
 - Adding a function, a handled method, or a schema keyword the validator enforces is a **minor** bump.
-- The variables consumers set — `MCP_TOOLS_LIST_FILE`, `MCP_CONFIG_FILE`, `MCP_LOG_FILE`, `MCP_EXTRA_LOG_FILE`, `PROJECT_ROOT` — are part of that API.
+- The variables consumers set — `MCP_TOOLS_LIST_FILE`, `MCP_CONFIG_FILE`, `MCP_LOG_FILE`, `MCP_EXTRA_LOG_FILE`, `MCP_LOG_STDERR`, `PROJECT_ROOT` — are part of that API. Names prefixed `_MCP_` are internal: they carry no guarantee and can change in any release.
 - Sourcing the file with no other file present is guaranteed across majors.
 
 Tightening the validator is a **major** bump even though it fixes a hole: arguments a consumer's clients send today start returning `isError` after the upgrade.
 
 ## Stdout discipline
 
-Stdout carries the JSON-RPC stream. Anything written outside `create_response` / `create_error_response` corrupts the protocol. Diagnostics go to `log`. `validate_tool_arguments` is the one deliberate exception — it prints a human-readable message and returns 1, which `handle_tools_call` turns into an `isError` result.
+Stdout carries the JSON-RPC stream. `run_mcp_server` captures each dispatch's stdout and echoes it, so only response construction writes there: `create_response`, `create_error_response`, and the deferred responses `handle_tools_call` replays for requests that arrived mid-call. Diagnostics go to `log`. `validate_tool_arguments` is the one deliberate exception — it prints a human-readable message and returns 1, which `handle_tools_call` turns into an `isError` result.
 
 ## Testing
 

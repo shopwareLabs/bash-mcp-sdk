@@ -2,12 +2,14 @@
 
 A Bash framework for writing [Model Context Protocol](https://modelcontextprotocol.io) servers. Handles the JSON-RPC 2.0 stdio loop, tool dispatch, argument validation against each tool's `inputSchema`, and logging.
 
-One file, `lib/mcpserver_core.sh`. It sources nothing and depends on nothing but `jq`.
+One file, `lib/mcpserver_core.sh`. It sources nothing and needs `jq`, plus `ps` and `mkfifo` for the tool lifecycle. `pgrep` is optional; the section below says what a system without it gives up.
 
 ## 📌 Requirements
 
-- Bash 4.0+
+- Bash 4.1+ — the file allocates file descriptors with `{var}` redirection, which arrived in 4.1.
 - `jq` 1.7+ — below that floor, jq parses every number to a double, so the validator's `integer` check cannot see a fraction the double rounded away.
+- `ps` and `mkfifo` — the tool lifecycle. `run_mcp_server` creates the lifeline with `mkfifo`, and the sentinel that kills a tool's process group once the server is gone reads that group's id from `ps`. Both ship with macOS and standard Linux.
+- `pgrep` (optional) — how a cancellation tells a live tool process group from an emptied one, so a tool that dies on the `SIGTERM` is reaped at once rather than after the two-second grace. macOS and standard Linux ship it. Without it a cancellation still escalates to `SIGKILL`, but it waits the whole grace first, because the fallback check counts the sentinel that guards the group.
 
 > [!NOTE]
 > macOS ships Bash 3.2. Install a current Bash (`brew install bash`) or run servers under one.
@@ -37,7 +39,7 @@ Configured by environment variable before sourcing:
 | `MCP_EXTRA_LOG_FILE`  | unset         | Second log target; `PROJECT_ROOT` resolves a relative path. |
 | `MCP_LOG_STDERR`      | `0`           | Set to `1` to also mirror each log line to stderr.       |
 
-Methods handled: `initialize`, `tools/list`, `tools/call`, `notifications/initialized`, `ping`. Anything else returns `-32601`.
+Methods handled: `initialize`, `tools/list`, `tools/call` and `ping`; the notifications `notifications/initialized` and `notifications/cancelled`. A request for any other method returns `-32601`; a notification for one is logged and ignored.
 
 ### Writing a server
 
@@ -63,6 +65,10 @@ tool_greet() {
 run_mcp_server
 ```
 
+A tool may also define an optional `tool_<name>_cancel` hook, which the server calls when the call is cancelled. *Cancelling and shutting down* below gives its contract.
+
+The hook is resolved by name, so a tool whose own name ends in `_cancel` is also the cancellation hook of whatever precedes that suffix: a tool named `foo_cancel` is dispatched as a tool and is called when `foo` is cancelled. Do not name a tool `<other>_cancel` unless that is what you mean.
+
 Every `inputSchema` in `tools.json` is enforced before the tool function runs — `required`, `additionalProperties: false`, `type`, `pattern`, `minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum`, array `items.type` / `items.enum`, and `enum`. A `type` — on a property or on `items` — may be one name or a list of alternatives (e.g. `"type": ["integer", "string"]`). A value satisfies it by matching any member. A range bound applies only to a number-valued argument — a string, boolean, or other non-number carries no bound — and a bound that is not itself a number is left unenforced, which also covers the JSON Schema draft-04 boolean form `"exclusiveMinimum": true`. Diagnostics report the most fundamental defect first, in that order. A tool with no `inputSchema` is dispatched unvalidated.
 
 A tool that exits non-zero returns its combined output as an `isError` result rather than killing the server.
@@ -72,8 +78,26 @@ A tool that exits non-zero returns its combined output as an `isError` result ra
 
 Two properties of tool dispatch to write against:
 
-- A tool function runs with errexit disabled: dispatch tests the function's exit status, and Bash turns `set -e` off inside anything tested in a conditional. Check each step's status yourself and return non-zero to produce the `isError` result.
-- A tool function inherits the server's stdin, which is the JSON-RPC pipe. A child process that reads stdin blocks on it forever, or consumes bytes meant for the server. Run anything that might prompt with `< /dev/null`.
+- A tool function always runs with errexit disabled, on every dispatch path — under `run_mcp_server` and from a direct call to `process_request` or `handle_tools_call` alike. A failing step does not end the tool. Check each step's status yourself and return non-zero to produce the `isError` result.
+- A tool function's stdin is `/dev/null`. A read returns EOF instead of blocking on the server's protocol stream or consuming bytes meant for it.
+
+### Cancelling and shutting down
+
+A client cancels an in-flight call by sending `notifications/cancelled` with the request's id in `params.requestId`. The server stops the tool's process group — `SIGTERM`, then `SIGKILL` for whatever is left of it — and sends no response for that id. A cancellation that names nothing in flight is logged and dropped. A tool that dies on the `SIGTERM` is reaped at once rather than after the two-second grace: the sentinel that guards the group outlives the tool by design, so it is not counted as a live member when the grace is measured. That measurement is `pgrep`'s; on a system without it the group's raw liveness is the measure and such a cancellation waits the full grace.
+
+The tool's process group is the containment boundary. Anything the tool leaves running in it — a background child it never waits for — is killed when the call ends, on success as much as on cancellation. A tool that must outlive the call has to leave the group itself by detaching into a new session. Bash offers no builtin for that and macOS ships no `setsid(1)`, so such a tool needs its own double-fork.
+
+A tool may define an optional `tool_<name>_cancel` hook. It runs with the call's original `arguments` JSON as its one argument, and with an empty string when a signal tears the server down, because the in-flight record holds the tool's group and name and no arguments. A hook that runs longer than two seconds is killed, and its exit status is logged rather than failing the call. The hook runs before the group is signalled, and each of the two steps gets its own two seconds, so a wedged hook followed by a group that ignores `SIGTERM` holds a cancellation for about four seconds before the final `SIGKILL`.
+
+`run_mcp_server` installs `EXIT`, `INT`, `TERM`, `HUP` and `PIPE` traps, replacing any handler a consumer set on those signals. A signal to the server's whole process group takes effect at once, while one sent to the server's pid alone mid-call takes effect after that call returns and lets it finish. Both shapes stop the tool group before the server exits, and a signal that arrives while a teardown is already running does not cut it short: that pass finishes, and the shell then dies by the signal.
+
+A call that finishes that way may go unanswered. Bash runs a trap between commands, so the trap fires as soon as the dispatch returns — the response the dispatch built is still in a variable at that point, and the shell dies before the loop echoes it. Kill the process group to stop a call and still see its result; signal the pid alone to stop the server, and expect a call in flight to go unanswered.
+
+Bash cannot install a handler for a signal that was ignored when the shell started, and a non-interactive shell's plain `&` hands the background job `SIGINT` and `SIGQUIT` already ignored. A server backgrounded that way with job control off therefore has no `INT` trap at all; the `TERM` and `HUP` traps install normally.
+
+A sentinel in the tool's process group covers a server killed with `SIGKILL`, which can run no trap: it waits on a pipe the server holds open, and kills that group once the last process holding the pipe is gone. It ignores `SIGTERM`, so the group `TERM` a cancellation sends leaves it in place and the group's final `SIGKILL` is what reaps it — a server killed before that `SIGKILL` lands is still covered, a tool that is itself ignoring `SIGTERM` included (the grace then runs its full two seconds). That kill runs no cleanup, so small files under `TMPDIR` (default `/tmp`) can be left behind — the in-flight record (`mcp-inflight.*`), the lifeline directory (`mcp-lifeline.*`), an in-flight call's output file (`mcp-tool-output.*`) with the sentinel pid recorded beside it (`mcp-sentinel.*`), and the partial-line handoff file (`mcp-partial.*`). A server that goes down on a signal it can trap removes the in-flight call's output file as part of its teardown.
+
+A client that closes stdin mid-call still gets that call's response: the server finishes the call, answers it, and then exits. Requests that arrived during the call are answered after it, in order. A fragment left by that EOF is discarded, and only its length reaches the log — unless the bytes already parse as JSON, which is a request the client finished writing without a trailing newline, and which is answered like any other line. A line the client had begun but left incomplete when the call ends is carried out of the dispatch through a file and joined to the next line the read loop takes in, so the call's response reaches the client as soon as the dispatch returns rather than waiting on that line. The request the completed line forms is answered behind the response already sent; a client that never finishes the line delays only the next request, exactly as one that stalls between requests. If the client closes stdin while such a line is still open, the joined fragment is answerable on the same terms: it is answered when it parses as JSON, and discarded with only its length logged when it does not.
 
 ## 🔗 Vendoring
 
