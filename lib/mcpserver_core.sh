@@ -946,39 +946,43 @@ _sentinel_pid_for() {
 # A group whose only live member is the sentinel therefore reads as dead, and
 # the caller's grace loop ends. The sentinel is not forgotten: _kill_tool_group
 # clears whatever is left of the group once the tool is reaped.
-# A group the kernel has already released is dead here too — pgrep matches
+# A group the kernel has already released is dead here too — the scan matches
 # nothing — but a caller that must not signal a recycled group id gates on
 # `kill -0 -- "-<pgid>"` for that, not on this.
-# pgrep's exit status is read, not just its output: 0 means it found members and
-# 1 means the group holds none, while anything else — 127 for a binary that is
-# not there, and pgrep's own failure codes — is UNKNOWN. An unknown liveness
-# degrades to the previous whole-group check rather than reading as an empty
-# group: read as empty it would end the caller's grace loop at once and skip the
-# SIGKILL that follows it, leaving a tool that ignores TERM alive. The fallback
-# counts the sentinel, so it costs the full grace — the safe direction, which
-# delays a kill rather than dropping it.
+# The members come from a full `ps` listing filtered here rather than from
+# `pgrep -g` or a `ps` selection flag: BusyBox ships both binaries without
+# group selection, and its usage error exits 1 — the same status that means
+# "no members" — so a selecting call cannot tell an emptied group from a probe
+# that never ran. The full listing with `pid` and `pgid` columns is common to
+# procps, BSD and BusyBox `ps`. A `ps` that fails anyway — 127 for a binary
+# that is not there, or its own failure codes — is UNKNOWN, and an unknown
+# liveness degrades to the previous whole-group check rather than reading as an
+# empty group: read as empty it would end the caller's grace loop at once and
+# skip the SIGKILL that follows it, leaving a tool that ignores TERM alive. The
+# fallback counts the sentinel, so it costs the full grace — the safe
+# direction, which delays a kill rather than dropping it.
 # Args: $1 = group id, $2 = sentinel pid (empty when unknown)
 _tool_group_has_live_member() {
     local pgid="$1"
     local sentinel_pid="$2"
 
-    local members=""
-    local pgrep_rc=0
+    local listing=""
+    local ps_rc=0
     # Guarded so a missing binary, which reaches a subshell as a 127 exit rather
     # than through errexit, cannot end the caller.
-    members="$(pgrep -g "$pgid" 2>/dev/null)" || pgrep_rc=$?
-    if [[ $pgrep_rc -ne 0 && $pgrep_rc -ne 1 ]]; then
+    listing="$(ps -A -o pgid=,pid= 2>/dev/null)" || ps_rc=$?
+    if [[ ${ps_rc} -ne 0 ]]; then
         kill -0 -- "-${pgid}" 2>/dev/null
         return
     fi
 
-    local member
-    while IFS= read -r member; do
-        if [[ -z "$member" || "$member" == "$sentinel_pid" ]]; then
+    local entry_pgid member
+    while read -r entry_pgid member _; do
+        if [[ "${entry_pgid}" != "${pgid}" || -z "${member}" || "${member}" == "${sentinel_pid}" ]]; then
             continue
         fi
         return 0
-    done <<< "$members"
+    done <<< "${listing}"
     return 1
 }
 
@@ -1102,7 +1106,9 @@ process_request() {
 # in this design never writes.
 # The group id comes from ps because every subshell inherits the main shell's
 # $$, and this sentinel shares the group of the wrapper that spawned it, so
-# neither $$ nor its own pid names the group it has to kill.
+# neither $$ nor its own pid names the group it has to kill. It is read from a
+# full listing filtered by pid rather than a `-p` selection, which BusyBox `ps`
+# does not have.
 # It ignores TERM, INT and HUP: a cancellation TERMs the tool's whole group, and
 # a sentinel that died there would leave a tool group that ignores TERM with
 # nothing left to kill it once the server itself is gone. The group SIGKILL that
@@ -1112,8 +1118,14 @@ _lifeline_sentinel() {
 
     trap '' TERM INT HUP
 
-    local pgid
-    pgid="$(ps -o pgid= -p "${BASHPID}" | tr -d '[:space:]')"
+    local pgid=""
+    local entry_pid entry_pgid
+    while read -r entry_pid entry_pgid _; do
+        if [[ "${entry_pid}" == "${BASHPID}" ]]; then
+            pgid="${entry_pgid}"
+            break
+        fi
+    done < <(ps -A -o pid=,pgid= 2>/dev/null)
 
     local line=""
     IFS= read -r -u "${read_fd}" line || true

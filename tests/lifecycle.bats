@@ -57,7 +57,7 @@ _mcp_wait_for_exit() {
     local deadline=$(( SECONDS + limit ))
     local state=""
     while (( SECONDS < deadline )); do
-        state="$(ps -o state= -p "${pid}" 2>/dev/null | tr -d '[:space:]')"
+        state="$(_mcp_proc_state "${pid}")"
         if [[ -z "${state}" || "${state}" == Z* ]]; then
             return 0
         fi
@@ -103,7 +103,7 @@ _mcp_fixture_procs() {
         if [[ "${line}" == *"${CANCELLATION_SERVER}"* && "${line}" == *"${marker}"* ]]; then
             count=$(( count + 1 ))
         fi
-    done < <(ps -Ao state=,args=)
+    done < <(ps -A -o stat=,args=)
     printf '%s' "${count}"
 }
 
@@ -506,8 +506,10 @@ teardown() {
 @test "mcp_start_server fails loudly when the server exits immediately" {
     # The harness's contract: a server that died at startup has not started, so
     # starting one is an error at the start rather than a mystery on the first
-    # write. A binary that exits before the check is exactly that server.
-    run mcp_start_server /usr/bin/true
+    # write. A binary that exits before the check is exactly that server. Its
+    # path is resolved rather than hardcoded: `true` lives under /usr/bin on
+    # macOS and /bin on Alpine.
+    run mcp_start_server "$(type -P true)"
 
     assert_failure
     assert_output --partial 'exited within 0.2s'

@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 - A multi-distro test harness: `docker/` images for Debian (glibc/GNU) and Alpine (musl/busybox), `scripts/test-linux.sh` to run the BATS suite inside them and ShellCheck in the `koalaman/shellcheck-alpine` image, and a CI matrix that builds each image with a GHCR build cache. Tooling only — `lib/mcpserver_core.sh` and its consumer-facing surface are unchanged.
 
+### Fixed
+
+- The tool lifecycle now works on BusyBox. The sentinel's group id and the cancellation path's group-liveness check now read full `ps -A -o` listings (`pid` and `pgid` columns) filtered in Bash, instead of `pgrep -g` and a `ps -p` selection BusyBox does not have. BusyBox `pgrep -g` usage errors exit 1, the same status an emptied group reports, so a cancellation read that as the group already gone and ended the grace period early, dropping the `SIGKILL` escalation that should have followed; the sentinel's `ps -o pgid= -p` read failed outright. `pgrep` is no longer used anywhere in the SDK, and Alpine/BusyBox consumers need no procps.
+
 ## [4.0.0] - 2026-09-12
 
 ### Added
