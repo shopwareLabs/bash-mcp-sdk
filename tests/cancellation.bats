@@ -10,8 +10,8 @@
 # handle_tools_call, which never reads the caller's stdin at all — the same
 # reason a tools/call replayed after an in-flight call is answered without
 # reading the stream either.
-# The group's liveness check must never read a `pgrep` that could not answer as
-# an empty group, which is what would drop the SIGKILL escalation.
+# The group's liveness check must never read a `ps` scan that could not answer
+# as an empty group, which is what would drop the SIGKILL escalation.
 # A line the client sent in pieces must not withhold the response of the call
 # it arrived behind, whether the rest of it never arrives or the client closes
 # stdin first, and a fragment may only be joined to a line whose read succeeded.
@@ -57,7 +57,7 @@ _mcp_wait_for_exit() {
     local deadline=$(( SECONDS + limit ))
     local state=""
     while (( SECONDS < deadline )); do
-        state="$(ps -o state= -p "${pid}" 2>/dev/null | tr -d '[:space:]')"
+        state="$(_mcp_proc_state "${pid}")"
         if [[ -z "${state}" || "${state}" == Z* ]]; then
             return 0
         fi
@@ -386,18 +386,24 @@ teardown() {
     assert_success
 }
 
-@test "a pgrep that cannot answer still lets a TERM-ignoring tool be killed" {
-    # Telling a live process group from an emptied one is pgrep's job, and its
-    # exit status is the answer: 0 means it found members, 1 means it found none.
-    # A pgrep that fails for any other reason — here a binary reporting 127, the
-    # status a shell gives for one that is not there — has not answered at all,
-    # and an unanswered liveness must not read as an empty group: the grace loop
-    # would end at once, the SIGKILL that follows it would be skipped, and a tool
-    # that ignores TERM would outlive its own cancellation.
+@test "a ps scan that cannot answer still lets a TERM-ignoring tool be killed" {
+    # Telling a live process group from an emptied one is the ps member scan's
+    # job: members in the listing mean live, none mean emptied. A ps that fails
+    # instead — here a binary reporting 127, the status a shell gives for one
+    # that is not there — has not answered at all, and an unanswered liveness
+    # must not read as an empty group: the grace loop would end at once, the
+    # SIGKILL that follows it would be skipped, and a tool that ignores TERM
+    # would outlive its own cancellation.
+    # The stub fails only the liveness scan's column signature and hands every
+    # other invocation to the real binary, so the harness's own ps reads and
+    # the sentinel's group-id read stay answered.
+    local real_ps
+    real_ps="$(type -P ps)"
     local stub_dir="${BATS_TEST_TMPDIR}/stub-bin"
     mkdir -p "${stub_dir}"
-    printf '#!/bin/sh\nexit 127\n' > "${stub_dir}/pgrep"
-    chmod +x "${stub_dir}/pgrep"
+    printf '#!/bin/sh\ncase "$*" in *"pgid=,pid="*) exit 127 ;; esac\nexec %s "$@"\n' \
+        "${real_ps}" > "${stub_dir}/ps"
+    chmod +x "${stub_dir}/ps"
     PATH="${stub_dir}:${PATH}"
     export PATH
 

@@ -2,14 +2,13 @@
 
 A Bash framework for writing [Model Context Protocol](https://modelcontextprotocol.io) servers. Handles the JSON-RPC 2.0 stdio loop, tool dispatch, argument validation against each tool's `inputSchema`, and logging.
 
-One file, `lib/mcpserver_core.sh`. It sources nothing and needs `jq`, plus `ps` and `mkfifo` for the tool lifecycle. `pgrep` is optional; the section below says what a system without it gives up.
+One file, `lib/mcpserver_core.sh`. It sources nothing and needs `jq`, plus `ps` and `mkfifo` for the tool lifecycle.
 
 ## 📌 Requirements
 
 - Bash 4.1+ — the file allocates file descriptors with `{var}` redirection, which arrived in 4.1.
 - `jq` 1.7+ — below that floor, jq parses every number to a double, so the validator's `integer` check cannot see a fraction the double rounded away.
-- `ps` and `mkfifo` — the tool lifecycle. `run_mcp_server` creates the lifeline with `mkfifo`, and the sentinel that kills a tool's process group once the server is gone reads that group's id from `ps`. Both ship with macOS and standard Linux. BusyBox `ps` lacks the flags this lifecycle needs, so Alpine consumers need procps.
-- `pgrep` (optional) — how a cancellation tells a live tool process group from an emptied one, so a tool that dies on the `SIGTERM` is reaped at once rather than after the two-second grace. macOS and standard Linux ship it. Without it a cancellation still escalates to `SIGKILL`, but it waits the whole grace first, because the fallback check counts the sentinel that guards the group. BusyBox `pgrep` lacks the needed `-g` flag, so Alpine consumers need procps.
+- `ps` and `mkfifo` — the tool lifecycle. `run_mcp_server` creates the lifeline with `mkfifo`; the sentinel that kills a tool's process group once the server is gone, and the cancellation path that tells a live group from an emptied one, both read a full `ps -A -o` listing (`pid` and `pgid` columns) and filter it in Bash rather than selecting by pid or group. That shape is common to procps, BSD/macOS, and BusyBox `ps`, so BusyBox is enough and Alpine consumers need no procps.
 
 > [!NOTE]
 > macOS ships Bash 3.2. Install a current Bash (`brew install bash`) or run servers under one.
@@ -83,7 +82,7 @@ Two properties of tool dispatch to write against:
 
 ### Cancelling and shutting down
 
-A client cancels an in-flight call by sending `notifications/cancelled` with the request's id in `params.requestId`. The server stops the tool's process group — `SIGTERM`, then `SIGKILL` for whatever is left of it — and sends no response for that id. A cancellation that names nothing in flight is logged and dropped. A tool that dies on the `SIGTERM` is reaped at once rather than after the two-second grace: the sentinel that guards the group outlives the tool by design, so it is not counted as a live member when the grace is measured. That measurement is `pgrep`'s; on a system without it the group's raw liveness is the measure and such a cancellation waits the full grace.
+A client cancels an in-flight call by sending `notifications/cancelled` with the request's id in `params.requestId`. The server stops the tool's process group — `SIGTERM`, then `SIGKILL` for whatever is left of it — and sends no response for that id. A cancellation that names nothing in flight is logged and dropped. A tool that dies on the `SIGTERM` is reaped at once rather than after the two-second grace: the sentinel that guards the group outlives the tool by design, so it is not counted as a live member when the grace is measured. The grace is measured against a full `ps` listing of the group's members; when `ps` cannot answer, the group's raw liveness is the measure, which counts the sentinel, and such a cancellation waits the full grace.
 
 The tool's process group is the containment boundary. Anything the tool leaves running in it — a background child it never waits for — is killed when the call ends, on success as much as on cancellation. A tool that must outlive the call has to leave the group itself by detaching into a new session. Bash offers no builtin for that and macOS ships no `setsid(1)`, so such a tool needs its own double-fork.
 
@@ -138,16 +137,14 @@ Or run it in containers, which need Docker:
 
 ```bash
 ./scripts/test-linux.sh            # ShellCheck, then Debian and Alpine
-./scripts/test-linux.sh debian     # one distro: no ShellCheck, and a failure always gates
+./scripts/test-linux.sh debian     # one distro: no ShellCheck
 ```
 
 Set `BASE_IMAGE_DEBIAN` or `BASE_IMAGE_ALPINE` to override that build's base image; set `JQ_VERSION` to install that upstream static jq release instead of the distro package.
 
 Debian is the glibc/GNU run. Alpine adds only Bash and jq to musl/busybox, so a suite that leans on a tool the dev machine happens to carry fails there.
 
-The Alpine run currently fails. BusyBox `ps` lacks the test harness liveness probes (`ps -o state= -p` in `tests/test_helper/mcp_client.bash` and duplicates in `tests/cancellation.bats` and `tests/lifecycle.bats`) and `ps -Ao state=,args=` in `tests/lifecycle.bats`. The hardcoded `/usr/bin/true` in `tests/lifecycle.bats` fails for a different reason: Alpine has no such path. Consumer-visible SDK calls also need procps: the sentinel uses `ps -o pgid= -p` in `lib/mcpserver_core.sh`, and the cancellation path reads BusyBox `pgrep -g` usage errors as an empty group. Until those sites are fixed, BusyBox `ps` and `pgrep` are not enough for the SDK's tool lifecycle. The CI Alpine leg reports its result without gating merges.
-
-That tolerance belongs to a bare run only, because a bare run reports on both distros at once. Naming a distro asks for that distro's verdict: the ShellCheck stage is skipped, and any failure gates, Alpine included.
+Both suites gate, in bare and named runs alike.
 
 Lint with ShellCheck before pushing:
 

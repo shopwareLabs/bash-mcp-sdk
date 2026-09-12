@@ -34,7 +34,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    continue-on-error: ${{ matrix.distro == 'alpine' }}
     strategy:
       fail-fast: false
       matrix:

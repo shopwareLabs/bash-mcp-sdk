@@ -28,14 +28,6 @@ record_stage() {
     STAGE_RESULTS+=("$2")
 }
 
-# A bare run covers both distros and reports one result, so Alpine's BusyBox
-# gaps are tolerated there. Naming a distro asks for that distro's verdict, so
-# its failure gates. Remove Alpine from this set once README §Testing's BusyBox
-# follow-up is fixed.
-is_allowed_failure() {
-    [[ "${distros_defaulted}" -eq 1 && "$1" == "alpine" ]]
-}
-
 base_image_for() {
     case "$1" in
         debian) printf '%s' "${BASE_IMAGE_DEBIAN:-}" ;;
@@ -91,7 +83,6 @@ run_distro_stage() {
 
 no_build=0
 distros=()
-distros_defaulted=0
 
 for arg in "$@"; do
     case "${arg}" in
@@ -121,7 +112,6 @@ fi
 
 if [[ "${#distros[@]}" -eq 0 ]]; then
     distros=(debian alpine)
-    distros_defaulted=1
     if ! run_shellcheck_stage; then
         record_stage shellcheck FAIL
     else
@@ -131,11 +121,7 @@ fi
 
 for distro in "${distros[@]}"; do
     if ! run_distro_stage "${distro}"; then
-        if is_allowed_failure "${distro}"; then
-            record_stage "${distro}" "FAIL (allowed)"
-        else
-            record_stage "${distro}" FAIL
-        fi
+        record_stage "${distro}" FAIL
     else
         record_stage "${distro}" PASS
     fi
@@ -145,7 +131,7 @@ failed=0
 printf '\n%s\n' "==> Summary"
 for i in "${!STAGE_NAMES[@]}"; do
     printf '%s  %s\n' "${STAGE_RESULTS[$i]}" "${STAGE_NAMES[$i]}"
-    if [[ "${STAGE_RESULTS[$i]}" != "PASS" && "${STAGE_RESULTS[$i]}" != "FAIL (allowed)" ]]; then
+    if [[ "${STAGE_RESULTS[$i]}" != "PASS" ]]; then
         failed=1
     fi
 done

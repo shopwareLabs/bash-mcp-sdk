@@ -34,6 +34,22 @@
 MCP_CLIENT_FD=""
 MCP_CLIENT_FD_OPEN=0
 
+# Print the process state of <pid>, empty when it has no ps entry. Read from a
+# full listing filtered here because BusyBox `ps` has no `-p` selection, and
+# through the `stat` keyword, the one spelling procps, BSD and BusyBox share —
+# `state` is procps and BSD only.
+_mcp_proc_state() {
+    local pid="$1"
+    local entry_pid state
+    while read -r entry_pid state _; do
+        if [[ "${entry_pid}" == "${pid}" ]]; then
+            printf '%s' "${state}"
+            return 0
+        fi
+    done < <(ps -A -o pid=,stat= 2>/dev/null)
+    return 0
+}
+
 # Start <server-script-path> with a FIFO as its stdin and its stdout and stderr
 # captured to files under a fresh temp dir. Blocks only as long as the FIFO
 # rendezvous takes, then fails loudly if the server is gone 0.2s in — a server
@@ -83,7 +99,7 @@ mcp_start_server() {
     # it succeeds for a zombie, so a server that died within the 0.2s would
     # count as started and the failure would surface on the first write instead.
     local state
-    state="$(ps -o state= -p "${MCP_SERVER_PID}" 2>/dev/null | tr -d '[:space:]')"
+    state="$(_mcp_proc_state "${MCP_SERVER_PID}")"
     if [[ -z "${state}" || "${state}" == Z* ]]; then
         printf 'mcp_start_server: server %s exited within 0.2s\n' "${MCP_SERVER_PID}" >&2
         if [[ -s "${MCP_SERVER_ERR}" ]]; then
