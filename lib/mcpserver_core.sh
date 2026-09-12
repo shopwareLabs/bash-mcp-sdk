@@ -451,6 +451,24 @@ handle_tools_call() {
     local id="$1"
     local params="$2"
 
+    # A tools/call carries its arguments in a params object, so a params of any
+    # other type is an Invalid params. This gate runs before `.name` and
+    # `.arguments` are read, so those extractions only ever see an object and
+    # none of them can fail. That is what makes the crash fix a property of this
+    # function rather than of its caller: under `set -o posix` bash inherits
+    # errexit into the command substitution those extractions run in, and a
+    # failed one ends the whole server instead of answering the request. It also
+    # keeps a non-object params' `Cannot index ...` jq diagnostics off the
+    # process's stderr, unrouted through `log`. And it makes handle_tools_call
+    # safe as a direct public entry point on its own: a caller passing invalid
+    # JSON makes the `type` substitution print nothing, which is not "object",
+    # so the gate fails closed.
+    if [[ "$(printf '%s\n' "$params" | jq -r 'type')" != "object" ]]; then
+        log "ERROR" "tools/call params is not a JSON object"
+        create_error_response "$id" -32602 "Invalid params: expected an object"
+        return
+    fi
+
     local tool_name
     tool_name=$(echo "$params" | jq -r '.name // ""')
 

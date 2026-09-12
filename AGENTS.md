@@ -18,6 +18,7 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 | `tests/core_standalone.bats` | Pins the boundary: the file sources nothing, a server needs no other file |
 | `tests/exit_trap_isolation.bats` | Pins that `run_mcp_server`'s EXIT trap stays with the shell that runs it: a caller that isolates the call in a subshell keeps its own EXIT trap, and that subshell is where the post-loop reset of `_MCP_IN_SERVER_LOOP` is observable |
 | `tests/mcp_argument_validation.bats` | Pins the validator, including its diagnostic precedence |
+| `tests/tools_call_params.bats` | Pins that a `tools/call` whose `params` is a number, a string or an array answers `-32602 Invalid params` without ending the server under `set -o posix` and without a jq diagnostic on stderr |
 | `tests/error_response.bats` | Pins the error envelope builder, including its optional `data` argument |
 | `tests/read_json_file.bats` | Pins `read_json_file`: one JSON document per file, and the `-32603` each handler answers with when its configuration file is missing, empty, multi-document, or unparseable |
 | `tests/extra_log_file.bats` | Pins the logging surface (`log`, `_configure_extra_log_file`) |
