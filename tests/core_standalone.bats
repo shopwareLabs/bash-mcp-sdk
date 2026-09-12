@@ -11,6 +11,12 @@ load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
 CORE_SH="${REPO_ROOT}/lib/mcpserver_core.sh"
 
 setup() {
+    # A minimal valid config: initialize reads it, and the defaults it leaves in
+    # place are the values the standalone tests assert.
+    cat > "${BATS_TEST_TMPDIR}/config.json" <<'JSON'
+{}
+JSON
+
     cat > "${BATS_TEST_TMPDIR}/tools.json" <<'JSON'
 {
   "tools": [
@@ -30,7 +36,7 @@ JSON
     cat > "${BATS_TEST_TMPDIR}/server.sh" <<SERVER
 #!/usr/bin/env bash
 set -euo pipefail
-export MCP_CONFIG_FILE="/dev/null"
+export MCP_CONFIG_FILE="${BATS_TEST_TMPDIR}/config.json"
 export MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
 export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
 source "${CORE_SH}"

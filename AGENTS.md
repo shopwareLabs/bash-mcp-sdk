@@ -18,6 +18,7 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 | `tests/core_standalone.bats` | Pins the boundary: the file sources nothing, a server needs no other file |
 | `tests/mcp_argument_validation.bats` | Pins the validator, including its diagnostic precedence |
 | `tests/error_response.bats` | Pins the error envelope builder, including its optional `data` argument |
+| `tests/read_json_file.bats` | Pins `read_json_file`: one JSON document per file, and the `-32603` each handler answers with when its configuration file is missing, empty, multi-document, or unparseable |
 | `tests/extra_log_file.bats` | Pins the logging surface (`log`, `_configure_extra_log_file`) |
 | `tests/cancellation.bats` | Pins cancellation: the in-flight kill, the absent response, ignored cancellations, the cancel hook, tool stdin, and the EOF drain |
 | `tests/lifecycle.bats` | Pins server teardown: group and pid signals, the SIGKILL sentinel, and that no tool process outlives the server |
@@ -50,7 +51,7 @@ Tightening the validator is a **major** bump even though it fixes a hole: argume
 
 ## Stdout discipline
 
-Stdout carries the JSON-RPC stream. `run_mcp_server` captures each dispatch's stdout and echoes it, so only response construction writes there: `create_response`, `create_error_response`, and the deferred responses `handle_tools_call` replays for requests that arrived mid-call. Diagnostics go to `log`. `validate_tool_arguments` is the one deliberate exception — it prints a human-readable message and returns 1, which `handle_tools_call` turns into an `isError` result.
+Stdout carries the JSON-RPC stream. `run_mcp_server` captures each dispatch's stdout and echoes it, so only response construction writes there: `create_response`, `create_error_response`, and the deferred responses `handle_tools_call` replays for requests that arrived mid-call. Diagnostics go to `log`. `read_json_file` prints the parsed document, and every call site captures it in a command substitution, so that output never reaches the protocol stream. `validate_tool_arguments` is the one deliberate exception — it prints a human-readable message and returns 1, which `handle_tools_call` turns into an `isError` result.
 
 ## Testing
 
