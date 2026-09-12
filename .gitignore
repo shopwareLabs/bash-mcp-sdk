@@ -49,8 +49,14 @@ AGENTS.local.md
 !.claude/hook-contexts/
 !.claude/extensions/
 
+# Claude Code MCP server configuration
+.mcp.json
+
 # BATS testing framework (installed locally via .github/scripts/setup-bats.sh)
 .bats/
 
 # nodeterm session data
 .nodeterm/
+
+# ChunkHound code index database
+.chunkhound/
