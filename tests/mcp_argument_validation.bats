@@ -823,7 +823,7 @@ _assert_rejects_non_object() {
     printf '%s' '{"tools": [ broken' > "${MCP_TOOLS_LIST_FILE}"
     run validate_tool_arguments "strict" '{"number": "5"}'
     assert_failure
-    assert_output --partial "is missing or not parseable JSON"
+    assert_output --partial "is missing or does not hold one JSON object."
 }
 
 @test "validate_tool_arguments: a missing tool list file is rejected rather than skipping validation" {
@@ -835,15 +835,28 @@ _assert_rejects_non_object() {
     run validate_tool_arguments "strict" '{"number": "5"}'
     assert_failure
     assert_output --partial "Cannot validate arguments for strict"
-    assert_output --partial "is missing or not parseable JSON"
+    assert_output --partial "is missing or does not hold one JSON object."
 }
 
 @test "validate_tool_arguments: a tools list that parses but is not a tools list is rejected" {
-    # read_json_file guarantees exactly one parseable document, so the retained
-    # jq-failure branch below it fires only on a document that parses but cannot
-    # be read as a tools list: `42` makes `.tools[]?` error. That branch had no
-    # coverage before this case.
+    # `42` is one parseable document but not a JSON object, so the type gate in
+    # read_json_file rejects it first and the rejection is the first branch's
+    # message, not the jq-failure branch's. The jq-failure branch is still
+    # reachable through a file: an object whose `tools` holds a non-object
+    # element passes the gate and errors in `select`, since the trailing `?`
+    # guards only the iteration.
     printf '%s' '42' > "${MCP_TOOLS_LIST_FILE}"
+    run validate_tool_arguments "strict" '{"number": "5"}'
+    assert_failure
+    assert_output --partial "Cannot validate arguments for strict"
+    assert_output --partial "is missing or does not hold one JSON object."
+}
+
+@test "validate_tool_arguments: a tools list whose tools hold a non-object element is rejected" {
+    # `{"tools": [1]}` passes read_json_file's object gate; `select` then
+    # errors indexing the numeric element, so this rejection is the jq-failure
+    # branch's own message.
+    printf '%s' '{"tools": [1]}' > "${MCP_TOOLS_LIST_FILE}"
     run validate_tool_arguments "strict" '{"number": "5"}'
     assert_failure
     assert_output --partial "Cannot validate arguments for strict"

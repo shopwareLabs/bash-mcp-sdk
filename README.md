@@ -27,7 +27,7 @@ There is no install step. Copy `lib/mcpserver_core.sh` into your project and `so
 | `create_response`         | Build a JSON-RPC result envelope.                                     |
 | `create_error_response`   | Build a JSON-RPC error envelope. Optional 4th arg `data` (JSON value) is included when non-empty. |
 | `log`                     | Append to `MCP_LOG_FILE`, and to `MCP_EXTRA_LOG_FILE` when set.       |
-| `read_json_file`          | Read one JSON document from a file. Prints it; returns 1 on a missing file or one that is not exactly one JSON document. |
+| `read_json_file`          | Read one JSON document from a file. Prints it when it is a JSON object; returns 1 on a missing file or one that does not hold exactly one JSON object. |
 
 Configured by environment variable before sourcing:
 
@@ -39,7 +39,7 @@ Configured by environment variable before sourcing:
 | `MCP_EXTRA_LOG_FILE`  | unset         | Second log target; `PROJECT_ROOT` resolves a relative path. |
 | `MCP_LOG_STDERR`      | `0`           | Set to `1` to also mirror each log line to stderr.       |
 
-A missing or unparseable `MCP_CONFIG_FILE` or `MCP_TOOLS_LIST_FILE` is not read as an empty configuration. `initialize` and `tools/list` answer `-32603` naming the file they could not read, and a `tools/call` whose tools list cannot be read is rejected with an `isError` result instead of being dispatched unvalidated. Both files are effectively required.
+A missing or unparseable `MCP_CONFIG_FILE` or `MCP_TOOLS_LIST_FILE` is not read as an empty configuration. `initialize` and `tools/list` answer `-32603` naming the file they could not read — including a file whose single document is not a JSON object — and a `tools/call` whose tools list cannot be read is rejected with an `isError` result instead of being dispatched unvalidated. Both files are effectively required.
 
 Methods handled: `initialize`, `tools/list`, `tools/call` and `ping`; the notifications `notifications/initialized` and `notifications/cancelled`. A request for any other method returns `-32601`; a notification for one is logged and ignored. A message whose `id` is present but is not a string or an integer is neither a request nor a notification — MCP requires a request id to be a string or an integer, and a notification carries no id — so it is answered `-32600` rather than dropped. A request must be a single JSON object on a line of its own. A line that holds more than one JSON document, or that is not parseable JSON, is answered `-32700 Parse error` and not dispatched; a document that is valid JSON but not an object — `[1,2]`, `"x"`, `5`, `true`, `false` or `null` — is answered `-32600` with a null `id`.
 

@@ -57,15 +57,21 @@ _configure_extra_log_file() {
     log "INFO" "Extra log file configured: ${MCP_EXTRA_LOG_FILE}"
 }
 
-# Read exactly one JSON document from a file and print it compact.
+# Read exactly one JSON document from a file and print it compact, when that
+# document is a JSON object.
 # Prints nothing and returns 1 when the file is not a regular file, and when it
-# does not hold exactly one parseable document: an empty file and a file with
-# several documents both fail, because the callers hand this output to
-# `--argjson` and neither shape is one document. Never a fallback: each caller
-# answers the failure instead of treating the configuration as empty, so a
-# degraded result is not passed off as a correct one. `jq -e` is not used to
-# decide the parse — it exits 1 for a document that is `null` or `false`, both
-# of which are parseable and must pass.
+# does not hold exactly one parseable JSON object: an empty file, a file with
+# several documents, and a file whose single document is not an object all fail.
+# The callers both hand this output to `--argjson` and index it — `.tools` in
+# handle_tools_list, `.protocolVersion`, `.serverInfo` and `.capabilities` in
+# handle_initialize — so only an object is usable: an index of any other type
+# either errors or yields `null` in place of the caller's key, and a `null` or
+# `false` document is that accident rather than a configuration. Never a
+# fallback: each caller answers the failure instead of treating the
+# configuration as empty, so a degraded result is not passed off as a correct
+# one. `jq -e` is not used to decide the parse — its exit status comes from the
+# truthiness of the output rather than from whether the input parsed, and the
+# object test this function needs is made explicitly in the program below.
 read_json_file() {
     local file="$1"
     if [[ ! -f "$file" ]]; then
@@ -73,8 +79,8 @@ read_json_file() {
         return 1
     fi
     local parsed
-    if ! parsed=$(jq -cs 'if length == 1 then .[0] else ("expected exactly one JSON document" | halt_error) end' -- "$file" 2>/dev/null); then
-        log "ERROR" "Not exactly one parseable JSON document: ${file}"
+    if ! parsed=$(jq -cs 'if length == 1 and (.[0] | type) == "object" then .[0] else ("expected exactly one JSON object" | halt_error) end' -- "$file" 2>/dev/null); then
+        log "ERROR" "Not exactly one parseable JSON object: ${file}"
         return 1
     fi
     printf '%s\n' "$parsed"
@@ -184,8 +190,9 @@ handle_tools_list() {
 # unrelated enum mismatch).
 # A tool with no entry in the tools list, or whose entry declares no
 # inputSchema, is not validated. A tools list that cannot be read is a
-# rejection, whether it is missing or unparseable, so an unreadable list never
-# becomes a silent skip. A jq failure is a rejection and never a skip:
+# rejection, whether it is missing, unparseable, or holds a document that is
+# not a JSON object, so an unreadable list never becomes a silent skip. A jq
+# failure is a rejection and never a skip:
 # a validator that could not evaluate its input has not validated it, and
 # reporting success there would wave every constraint through. That branch is
 # defense-in-depth for a direct call rather than a live remote-input guard —
@@ -208,12 +215,15 @@ validate_tool_arguments() {
     # rejection and never a skip: a validator that could not read its schemas
     # has not validated anything, and reporting success there would wave every
     # declared constraint through, which is how the absent-list fallback read.
-    # The jq failure below is a second such branch, kept as defense in depth
-    # for a direct call.
+    # The jq failure below is a second such branch. read_json_file's object
+    # gate catches a file-borne document that is not an object in the branch
+    # above, but the jq branch stays reachable through a file: an object whose
+    # `tools` holds a non-object element passes the gate, and `select` then
+    # errors on that element — the trailing `?` guards only the iteration.
     rc=0
     tools_config=$(read_json_file "$MCP_TOOLS_LIST_FILE" 2>/dev/null) || rc=$?
     if [[ $rc -ne 0 ]]; then
-        printf '%s' "Cannot validate arguments for ${tool_name}: the tool list at ${MCP_TOOLS_LIST_FILE} is missing or not parseable JSON."
+        printf '%s' "Cannot validate arguments for ${tool_name}: the tool list at ${MCP_TOOLS_LIST_FILE} is missing or does not hold one JSON object."
         return 1
     fi
     rc=0

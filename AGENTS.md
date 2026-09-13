@@ -20,7 +20,7 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 | `tests/mcp_argument_validation.bats` | Pins the validator, including its diagnostic precedence |
 | `tests/tools_call_params.bats` | Pins that a `tools/call` whose `params` is a number, a string or an array answers `-32602 Invalid params` without ending the server under `set -o posix` and without a jq diagnostic on stderr |
 | `tests/error_response.bats` | Pins the error envelope builder, including its optional `data` argument |
-| `tests/read_json_file.bats` | Pins `read_json_file`: one JSON document per file, and the `-32603` each handler answers with when its configuration file is missing, empty, multi-document, or unparseable |
+| `tests/read_json_file.bats` | Pins `read_json_file`: one JSON object per file, and the `-32603` each handler answers with when its configuration file is missing, empty, multi-document, unparseable, or holds a document that is not a JSON object |
 | `tests/extra_log_file.bats` | Pins the logging surface (`log`, `_configure_extra_log_file`) |
 | `tests/cancellation.bats` | Pins cancellation: the in-flight kill, the absent response, ignored cancellations, the cancel hook, tool stdin, and the EOF drain |
 | `tests/lifecycle.bats` | Pins server teardown: group and pid signals, the SIGKILL sentinel, and that no tool process outlives the server |
