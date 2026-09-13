@@ -10,8 +10,26 @@ One file, `lib/mcpserver_core.sh`. It sources nothing and needs `jq`, plus `ps` 
 - `jq` 1.7+ — below that floor, jq parses every number to a double, so the validator's `integer` check cannot see a fraction the double rounded away.
 - `ps` and `mkfifo` — the tool lifecycle. `run_mcp_server` creates the lifeline with `mkfifo`; the sentinel that kills a tool's process group once the server is gone, and the cancellation path that tells a live group from an emptied one, both read a full `ps -A -o` listing (`pid` and `pgid` columns) and filter it in Bash rather than selecting by pid or group. That shape is common to procps, BSD/macOS, and BusyBox `ps`, so BusyBox is enough and Alpine consumers need no procps.
 
+Sourcing the file checks the first two floors. A Bash below 4.1, a `jq` that is missing or cannot run, or a `jq` below 1.7 is refused on stderr, naming the requirement and, where there is one, the version found, plus remediation for the platform — its package manager's command where one can be determined, and a generic line otherwise. `ps` and `mkfifo` go unchecked. `run_mcp_server` needs `mkfifo` as it starts, to create the lifeline, so a host without it fails there rather than at the first tool call; `ps` is reached only once a tool runs.
+
 > [!NOTE]
-> macOS ships Bash 3.2. Install a current Bash (`brew install bash`) or run servers under one.
+> macOS ships Bash 3.2. Install a current Bash (`brew install bash`) or run servers under one. An MCP host launched from the desktop does not read your shell profile, so the newer Bash has to sit on the PATH that host starts the server with.
+
+The floors are checked when the file is sourced, so `PATH` has to be right at that point — after sourcing, a `PATH` fix is too late. In a server script, export the new directory above the `source` line:
+
+```bash
+export PATH="/opt/homebrew/bin:${PATH}"
+source "/path/to/mcpserver_core.sh"
+```
+
+An operator who cannot edit the script sets it in the host manifest's launch command instead:
+
+```json
+"command": "bash",
+"args": ["-c", "export PATH=/opt/homebrew/bin:$PATH; exec /path/to/server.sh"]
+```
+
+That route also selects the Bash the server runs under, not only `jq`. The outer shell runs only `export` and `exec`, which Bash 3.2 handles, and the inner script's `#!/usr/bin/env bash` shebang then resolves through the repaired `PATH`. So one manifest change fixes both floors on a Mac whose only Bash is 3.2.
 
 ## 📦 Installation
 

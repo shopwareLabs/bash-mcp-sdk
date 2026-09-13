@@ -3,6 +3,219 @@
 # Based on Model Context Protocol specification
 # Requires: bash 4.1+, jq 1.7+
 
+# Pre-flight dependency guards for the two floors the header line declares.
+# Placed before `set -euo pipefail` so a refusal leaves the calling shell's
+# options exactly as it set them, and written so every line of it parses and
+# runs under bash 3.2: a guard that rejects a shell it cannot itself run on
+# never gets the chance to speak. Nothing below this point in the file is bound
+# by that — only this block. So: no `{var}` redirection, no `mapfile`, no
+# associative array, no `${var,,}`, no `declare -g`, no `|&`.
+# Every diagnostic here goes to stderr. Stdout carries the JSON-RPC stream, and
+# a protocol error is not an option at this point anyway — `create_response`
+# and `create_error_response` build every envelope with `jq -n`, so with jq
+# missing or too old there is nothing to answer a client with.
+
+# Print remediation lines for a failed dependency check. `dep` is `bash` or
+# `jq`. Output lands on stdout so the function stays pure and testable; each
+# call site redirects the whole diagnostic to stderr. `uname` is the only
+# external command reached for, and an absent or failing `uname` falls through
+# to the generic line rather than failing the hint.
+_mcp_install_hint() {
+    local dep="$1"
+
+    local floor="${dep}"
+    case "${dep}" in
+        bash) floor="bash 4.1 or newer" ;;
+        jq) floor="jq 1.7 or newer" ;;
+    esac
+
+    local platform=""
+    if command -v uname >/dev/null 2>&1; then
+        platform=$(uname -s 2>/dev/null) || platform=""
+    fi
+
+    case "${platform}" in
+        Darwin)
+            # Probe for brew, as the Linux arm probes its package managers: a
+            # Mac with no Homebrew — MacPorts, nix, a managed image — would
+            # otherwise be handed a command that does not exist. The generic
+            # line stands in for it, so such a Mac still gets remediation.
+            if command -v brew >/dev/null 2>&1; then
+                printf '%s\n' "  brew install ${dep}"
+            else
+                printf '%s\n' "  install ${floor} with your platform's package manager"
+            fi
+            if [[ "${dep}" == "bash" ]]; then
+                # The install on its own changes nothing: macOS keeps 3.2.57 at
+                # /bin/bash, and both usual launch paths — a
+                # `#!/usr/bin/env bash` shebang, and a host manifest whose
+                # command is `bash` — resolve through PATH. A GUI-launched MCP
+                # host reads no shell profile, so the PATH it hands the server
+                # is the one that has to be ordered. Printed whether or not brew
+                # was found: a GUI host hands the server a PATH with no brew on
+                # it, and that is precisely the case where the fix is a PATH
+                # fix, so this advice cannot sit inside the brew probe.
+                printf '%s\n' "  then place its directory before /usr/bin in the PATH the MCP host launches this server with"
+            fi
+            return 0
+            ;;
+        Linux)
+            if command -v apt-get >/dev/null 2>&1; then
+                printf '%s\n' "  apt-get install ${dep}"
+                return 0
+            fi
+            if command -v apk >/dev/null 2>&1; then
+                printf '%s\n' "  apk add ${dep}"
+                return 0
+            fi
+            if command -v dnf >/dev/null 2>&1; then
+                printf '%s\n' "  dnf install ${dep}"
+                return 0
+            fi
+            ;;
+    esac
+
+    printf '%s\n' "  install ${floor} with your platform's package manager"
+    return 0
+}
+
+# Whether bash <major>.<minor> is at or above the 4.1 floor.
+# Split out from the check below so the arithmetic is unit-testable:
+# BASH_VERSINFO is `declare -ar`, so a test cannot fake a version in-process and
+# drives this from a table instead. A non-numeric or empty component reads as
+# below the floor.
+_mcp_bash_meets_floor() {
+    local major="${1:-}"
+    local minor="${2:-}"
+
+    case "${major}" in ''|*[!0-9]*) return 1 ;; esac
+    case "${minor}" in ''|*[!0-9]*) return 1 ;; esac
+
+    # Arithmetic comparison, with `10#` forcing base 10: the guards above admit
+    # any all-digit string, and a leading zero is otherwise read as octal, where
+    # `08` is not a number and bash writes its own complaint to stderr.
+    # `(( ))` rather than `[[ -gt ]]`: both evaluate an operand arithmetically
+    # and agree on every value that reaches them here, but ShellCheck's SC2309
+    # flags a built-up operand handed to `[[ ]]`'s numeric operators, and the
+    # arithmetic form states the intent without needing a directive.
+    if (( 10#${major} > 4 )); then
+        return 0
+    fi
+    if (( 10#${major} == 4 && 10#${minor} >= 1 )); then
+        return 0
+    fi
+    return 1
+}
+
+# Whether a raw `jq --version` string is at or above the 1.7 floor.
+# The comparison is numeric, not lexical: `jq-1.10` is above `jq-1.7` and a
+# string comparison gets that backwards. A patch component, and any distro
+# suffix — attached to the minor or trailing the patch — is ignored, so
+# `jq-1.7.1-Debian-1` and `jq-1.7-Debian-1` are both above the floor.
+# Anything that does not parse as `jq-<major>.<minor>` is below it, a
+# prerelease included: `jq-1.7rc1` is not evidence of released 1.7 behavior,
+# and refusing what cannot be read is the direction that fails loudly.
+# The `case`-based technique is the one the test images use
+# (docker/debian.Dockerfile, docker/alpine.Dockerfile), but this helper admits a
+# non-numeric patch or distro suffix they reject: the images gate their own
+# build, where a version they cannot fully parse is a reason to fail it, while
+# this helper decides whether a consumer's server may run.
+_mcp_jq_meets_floor() {
+    local raw="${1:-}"
+
+    case "${raw}" in
+        jq-*) ;;
+        *) return 1 ;;
+    esac
+
+    local version="${raw#jq-}"
+    case "${version}" in
+        *.*) ;;
+        *) return 1 ;;
+    esac
+
+    local major="${version%%.*}"
+    local rest="${version#*.}"
+    local minor="${rest%%.*}"
+    # A distro suffix may attach to the minor with no patch component between
+    # them (`jq-1.8-1`); strip it so it cannot reach the digit guard and refuse a
+    # version that meets the floor. jq's own prereleases append alphanumerics
+    # with no hyphen (`jq-1.7rc1`) and stay refused; a hyphenated one would
+    # survive this strip, and no jq release carries one. Major is left
+    # unstripped: no real version needs it.
+    minor="${minor%%-*}"
+
+    case "${major}" in ''|*[!0-9]*) return 1 ;; esac
+    case "${minor}" in ''|*[!0-9]*) return 1 ;; esac
+
+    # Same shape and same reason as _mcp_bash_meets_floor: a leading zero would
+    # otherwise be read as octal, and `jq-1.08` would fail arithmetically rather
+    # than compare.
+    if (( 10#${major} > 1 )); then
+        return 0
+    fi
+    if (( 10#${major} == 1 && 10#${minor} >= 7 )); then
+        return 0
+    fi
+    return 1
+}
+
+# bash floor. Below 4.1 the file still parses, so there is no early error to go
+# on: `run_mcp_server` dies on the `exec {_MCP_LIFELINE_FD}<>` redirection with
+# `{_MCP_LIFELINE_FD}: not found`, which an MCP host reports as nothing more
+# than a server that failed to start.
+if [[ -z "${BASH_VERSINFO[0]:-}" ]] \
+    || ! _mcp_bash_meets_floor "${BASH_VERSINFO[0]:-}" "${BASH_VERSINFO[1]:-}"; then
+    printf '%s\n' "bash-mcp-sdk: bash 4.1 or newer is required; this shell reports ${BASH_VERSION:-unknown}." >&2
+    _mcp_install_hint bash >&2
+    # `return` when this file is sourced, `exit` when it is executed; the
+    # complaint `return` raises outside a function is suppressed because it is
+    # only ever raised on the executed path.
+    # Known gap: a consumer that sources this file without `set -e` carries on
+    # past the refusal and reaches `run_mcp_server: command not found`, with the
+    # message above already on stderr. An unconditional `exit` would close that
+    # gap and take the BATS runner down with it — the suites source this file
+    # into the test process.
+    # shellcheck disable=SC2317 # `return` succeeds only on the sourced path; on the executed path it fails and `exit 1` is what runs.
+    return 1 2>/dev/null || exit 1
+fi
+
+# jq presence.
+if ! command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "bash-mcp-sdk: jq was not found on PATH; jq 1.7 or newer is required." >&2
+    _mcp_install_hint jq >&2
+    # shellcheck disable=SC2317 # `return` succeeds only on the sourced path; on the executed path it fails and `exit 1` is what runs.
+    return 1 2>/dev/null || exit 1
+fi
+
+# jq floor. Below 1.7 the server starts and answers every request, and the
+# damage is silent: `validate_tool_arguments` reads a number back through
+# `tojson` to catch a fraction the conversion to a double rounded away, and
+# that depends on jq preserving the number literal — jq 1.7's "use decimal
+# number literals to preserve precision". Older jq parses every number to a
+# double, so `4503599627370496.5` renders whole and passes as an integer.
+# Probed once here, at source time, never on the request path.
+_mcp_jq_version=$(jq --version 2>/dev/null) || _mcp_jq_version=""
+if ! _mcp_jq_meets_floor "${_mcp_jq_version}"; then
+    if [[ -z "${_mcp_jq_version}" ]]; then
+        # The presence check above resolved a path, so jq is installed; it just
+        # did not answer. Wrong architecture, a missing shared library, a file
+        # that cannot execute. Naming the resolved path points the operator at
+        # the binary that is broken, and neither a version nor the
+        # distro-package warning below applies to a jq that is already on the
+        # machine.
+        printf '%s\n' "bash-mcp-sdk: jq was found on PATH but could not be run; jq 1.7 or newer is required." >&2
+        printf '%s\n' "  the jq at $(command -v jq) did not answer 'jq --version'" >&2
+    else
+        printf '%s\n' "bash-mcp-sdk: jq 1.7 or newer is required; jq reports '${_mcp_jq_version}'." >&2
+        printf '%s\n' "  a distribution package may itself sit below the floor; a newer jq may have to come from elsewhere" >&2
+    fi
+    _mcp_install_hint jq >&2
+    # shellcheck disable=SC2317 # `return` succeeds only on the sourced path; on the executed path it fails and `exit 1` is what runs.
+    return 1 2>/dev/null || exit 1
+fi
+unset _mcp_jq_version
+
 set -euo pipefail
 
 : "${MCP_CONFIG_FILE:=config.json}"
