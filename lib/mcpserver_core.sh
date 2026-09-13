@@ -4,22 +4,16 @@
 # Requires: bash 4.1+, jq 1.7+
 
 # Pre-flight dependency guards for the two floors the header line declares.
-# Placed before `set -euo pipefail` so a refusal leaves the calling shell's
-# options exactly as it set them, and written so every line of it parses and
-# runs under bash 3.2: a guard that rejects a shell it cannot itself run on
-# never gets the chance to speak. Nothing below this point in the file is bound
-# by that — only this block. So: no `{var}` redirection, no `mapfile`, no
-# associative array, no `${var,,}`, no `declare -g`, no `|&`.
-# Every diagnostic here goes to stderr. Stdout carries the JSON-RPC stream, and
-# a protocol error is not an option at this point anyway — `create_response`
-# and `create_error_response` build every envelope with `jq -n`, so with jq
-# missing or too old there is nothing to answer a client with.
+# This block alone uses no construct newer than bash 3.2, sits above the file's
+# own `set -euo pipefail`, and diagnoses on stderr. AGENTS.md §Pre-flight
+# guards.
 
 # Print remediation lines for a failed dependency check. `dep` is `bash` or
-# `jq`. Output lands on stdout so the function stays pure and testable; each
-# call site redirects the whole diagnostic to stderr. `uname` is the only
-# external command reached for, and an absent or failing `uname` falls through
-# to the generic line rather than failing the hint.
+# `jq`. Output lands on stdout so the function stays pure and testable, which
+# makes the `>&2` at every call site mandatory: a call site that forgets it
+# writes the hint into the JSON-RPC stream. `uname` is the only external command
+# reached for, and an absent or failing `uname` falls through to the generic
+# line rather than failing the hint.
 _mcp_install_hint() {
     local dep="$1"
 
@@ -79,11 +73,9 @@ _mcp_install_hint() {
     return 0
 }
 
-# Whether bash <major>.<minor> is at or above the 4.1 floor.
-# Split out from the check below so the arithmetic is unit-testable:
-# BASH_VERSINFO is `declare -ar`, so a test cannot fake a version in-process and
-# drives this from a table instead. A non-numeric or empty component reads as
-# below the floor.
+# Whether bash <major>.<minor> is at or above the 4.1 floor. Takes the version
+# as arguments so a suite can drive it from a table. AGENTS.md §Pre-flight
+# guards. A non-numeric or empty component reads as below the floor.
 _mcp_bash_meets_floor() {
     local major="${1:-}"
     local minor="${2:-}"
@@ -270,11 +262,8 @@ _configure_extra_log_file() {
     log "INFO" "Extra log file configured: ${MCP_EXTRA_LOG_FILE}"
 }
 
-# Read exactly one JSON document from a file and print it compact, when that
-# document is a JSON object.
-# Prints nothing and returns 1 when the file is not a regular file, and when it
-# does not hold exactly one parseable JSON object: an empty file, a file with
-# several documents, and a file whose single document is not an object all fail.
+# Read one JSON document from a file and print it compact when it is a JSON
+# object; prints nothing and returns 1 otherwise. README.md §API.
 # The callers both hand this output to `--argjson` and index it — `.tools` in
 # handle_tools_list, `.protocolVersion`, `.serverInfo` and `.capabilities` in
 # handle_initialize — so only an object is usable: an index of any other type
@@ -375,32 +364,15 @@ handle_tools_list() {
     create_response "$id" "$result"
 }
 
-# Validate call arguments against the tool's declared inputSchema.
-# Rejects arguments that are not a JSON object, enforces `required` (every
-# listed field must be present), when the schema sets
-# `additionalProperties: false` rejects any field not in `properties`,
-# enforces a declared `type` (string, integer, number, boolean, array,
-# object) on any present field, enforces a declared `pattern` against any
-# present string-valued field, enforces declared `minimum`, `maximum`,
-# `exclusiveMinimum` and `exclusiveMaximum` bounds against any present
-# number-valued field, enforces a declared array `items.type` and
-# `items.enum` against every element of a present array-valued field, and
-# rejects any present field whose schema declares an `enum` when the supplied
-# value is not one of the declared values. A declared `type` — on a property
-# or on `items` — is either one name or a list of alternatives, and a value
-# satisfies it by matching any member; a list that is empty or carries a
-# non-string member is malformed and left unenforced. A declared `integer` is
-# satisfied by a whole-valued number, decided from the number as jq renders it
-# and not from its double value alone, so a fractional literal at or above
-# 2^52 = 4503599627370496 is rejected instead of being read as whole; a
-# rendering that carries an exponent keeps the double-based verdict, which
-# admits a fractional value below the smallest subnormal double. A bound that
-# is not a number is malformed the same way, which also leaves the draft-04
-# boolean form `"exclusiveMinimum": true` unenforced. Diagnostics take
-# precedence in that order — missing, unknown, type, pattern, range, items,
-# enum — so a value that fails more than one constraint is reported with the
-# most fundamental defect first (a type mismatch is reported before an
-# unrelated enum mismatch).
+# Validate call arguments against the tool's declared inputSchema, rejecting
+# arguments that are not a JSON object. The enforced keywords, the union-type
+# rule, the range-bound rule and the diagnostic precedence order are
+# README.md §API.
+# A declared `integer` is satisfied by a whole-valued number, decided from the
+# number as jq renders it and not from its double value alone, so a fractional
+# literal at or above 2^52 = 4503599627370496 is rejected instead of being read
+# as whole; a rendering that carries an exponent keeps the double-based verdict,
+# which admits a fractional value below the smallest subnormal double.
 # A tool with no entry in the tools list, or whose entry declares no
 # inputSchema, is not validated. A tools list that cannot be read is a
 # rejection, whether it is missing, unparseable, or holds a document that is
@@ -651,20 +623,11 @@ validate_tool_arguments() {
     return 0
 }
 
-# Clear what a tool body must not inherit from the dispatch that runs it.
-# handle_tools_call, process_request and the polling wait are public entry
-# points, so a tool is free to call one of them to dispatch a nested call. The
-# server-loop state belongs to the outer dispatch, and a nested dispatch that
-# inherits it polls the tool's /dev/null stdin, reads the instant EOF as a client
-# closing the stream, and touches the shutdown flag — which stops the server as
-# soon as the outer call returns. The exported file handles are cleared with the
-# flag so a nested dispatch cannot overwrite the outer call's in-flight record
-# or hand its own fragment to the read loop.
-# Only the wrapper subshell's copies are changed: the parent dispatch runs the
-# tool in a subshell, so the outer call's own state and record are untouched.
-# A tool whose nested dispatch needs cancellation or deferred replay of its own
-# is out of scope — this restores the plain-call shape, which is what a direct
-# caller of these entry points gets.
+# Clear what a tool body must not inherit from the dispatch that runs it: a
+# nested dispatch that kept the server-loop state would stop the server as soon
+# as the outer call returned. docs/architecture.md §Tool containment.
+# A nested dispatch needing cancellation or deferred replay of its own is out of
+# scope; this restores the plain-call shape a direct caller gets.
 _reset_tool_dispatch_state() {
     _MCP_IN_SERVER_LOOP=0
     unset _MCP_SHUTDOWN_FLAG_FILE _MCP_INFLIGHT_FILE _MCP_PARTIAL_FILE
@@ -726,25 +689,14 @@ handle_tools_call() {
         return
     fi
 
-    # The tool runs in the background so an in-flight call can be cancelled.
-    # `set -m` gives the job its own process group, which is what lets one
-    # signal reach the tool and everything it spawned; job-control notices
-    # only exist for interactive shells, so nothing new reaches stderr here.
-    # Its stdin is /dev/null: an inherited stdin would be the client's
-    # JSON-RPC stream, and a tool that read it would consume protocol bytes.
-    #
-    # The job is a wrapper subshell rather than the tool itself, so that a
-    # second process — the lifeline sentinel — can sit in the tool's own
-    # process group and outlive the tool without outliving the group. The
-    # wrapper inherited no lifeline descriptor: the dispatch subshell closed
-    # and cleared its copy before this point, so the main server shell is the
-    # only writer and both the wrapper and the sentinel reach the lifeline by
-    # path, read-only.
+    # The tool runs in the background under `set -m` so an in-flight call can be
+    # cancelled by process group. Job-control notices exist only for interactive
+    # shells, so the `set -m` here adds nothing to stderr.
+    # docs/architecture.md §Tool containment.
     local output_file
     output_file=$(mktemp "${TMPDIR:-/tmp}/mcp-tool-output.XXXXXX")
-    # Where the wrapper below records the sentinel's pid. Derived from the
-    # output file, since that path is the only handle a shutdown teardown has on
-    # this call.
+    # Where the wrapper below records the sentinel's pid; _sentinel_pid_file
+    # carries the derivation and its reason.
     local sentinel_file
     sentinel_file="$(_sentinel_pid_file "$output_file")"
     local pid
@@ -757,19 +709,13 @@ handle_tools_call() {
     # _MCP_LIFELINE_FD: process_request closed and cleared that descriptor on
     # the way in, so it is empty here on the one path that has a lifeline.
     if [[ -n "${_MCP_LIFELINE_DIR:-}" && -p "${_MCP_LIFELINE_DIR}/lifeline" ]]; then
-        # The main server shell is the only writer. The wrapper opens its own
-        # reader before it starts the tool, so a server already gone leaves the
-        # wrapper blocked instead of starting an orphaned tool.
-        # The sentinel's pid is recorded beside the output file, in the file
-        # _sentinel_pid_file derives. A teardown leaves the sentinel out of the
-        # group's liveness: it outlives the tool by design, and counting it
-        # would hold every cancellation open for the whole grace period.
-        # The record is best effort like the in-flight file. A wrapper that
-        # cannot write it leaves the group's raw liveness as the teardown's only
-        # measure, which is slower but not wrong.
-        # The dispatch state is cleared immediately before the tool runs, on
-        # both branches, so a tool that dispatches a nested call of its own
-        # starts from the plain-call shape rather than the outer dispatch's.
+        # The wrapper opens its own reader before it starts the tool, so a
+        # server already gone leaves the wrapper blocked instead of starting an
+        # orphaned tool.
+        # The sentinel-pid record is best effort like the in-flight file. A
+        # wrapper that cannot write it leaves the group's raw liveness as the
+        # teardown's only measure, which is slower but not wrong.
+        # docs/architecture.md §Tool containment.
         ( exec {lifeline_rd}<"${_MCP_LIFELINE_DIR}/lifeline"; _lifeline_sentinel "${lifeline_rd}" & sentinel_pid=$!; set +e; printf '%s\n' "$sentinel_pid" > "${sentinel_file}"; _reset_tool_dispatch_state; "$func_name" "$arguments" ) \
             >"$output_file" 2>&1 </dev/null &
     else
@@ -785,22 +731,10 @@ handle_tools_call() {
         set +m
     fi
 
-    # In-flight record for the shutdown teardown. The main shell cannot see
-    # inside the command substitution this dispatches in, so the tool's process
-    # group, its name, and its output file are written where a trap can read
-    # them back — the output file's path exists nowhere else once this dispatch
-    # is gone. The record is one line of three space-separated fields,
-    # `<pgid> <tool_name> <output_file>`, and its second form is the tombstone
-    # _kill_tool_group writes as it clears the group: the same three fields with
-    # a literal `-` where the pgid was, which is what tells a teardown the id
-    # ahead of it is no longer signalable and only the two named files remain to
-    # release.
-    # Best effort and internal: a caller driving handle_tools_call directly has
-    # no server to tear down and records nothing.
-    # The record is written after the spawn, so a teardown landing in that gap
-    # finds nothing here and leaves the call to the lifeline sentinel, which
-    # needs no record. The cost of the gap is that the trap path cannot name
-    # the tool there, and so skips its cancel hook.
+    # The tool's process group, its name and its output file are written where a
+    # trap can read them back: the main shell cannot see inside the command
+    # substitution this dispatches in, and the output file's path exists nowhere
+    # else once this dispatch is gone. docs/architecture.md §The in-flight record.
     if [[ "${_MCP_IN_SERVER_LOOP:-0}" == "1" && -n "${_MCP_INFLIGHT_FILE:-}" ]]; then
         printf '%s %s %s\n' "$pid" "$tool_name" "$output_file" > "${_MCP_INFLIGHT_FILE}"
     fi
@@ -817,20 +751,14 @@ handle_tools_call() {
         _wait_tool_call "$pid" "$tool_name" "$output_file"
     fi
 
-    # The call's files are released, and the in-flight record truncated, before
-    # anything is built from them. A teardown that read the record while the
-    # wait above was still in progress could find the killed group's id live
-    # again through PGID recycling and TERM/KILL a process group that is
-    # nothing to do with this call; the tombstone is what took that id out of
-    # the record, and _kill_tool_group writes it as it empties the group — on
-    # the cancelled path through _teardown_tool_call's call to it, on the
-    # completion path through the wait helper's. Nothing below may run ahead of
-    # the clear: not the response construction, not the deferred replay.
+    # The call's files are released and the in-flight record truncated before
+    # anything is built from them, so neither the response construction nor the
+    # deferred replay below can run ahead of the clear.
     # The output file and the sentinel pid file go first and the record second:
     # those two paths exist nowhere but this subshell, so a teardown landing
-    # between the steps would read a record that names a path this dispatch has
-    # already released. The empty record names nothing, and the removal is
-    # idempotent, so a teardown that beat this dispatch to it loses nothing.
+    # between the steps reads a record naming a path this dispatch has already
+    # released, and its removal is idempotent, so it loses nothing.
+    # docs/architecture.md §The in-flight record.
     local output=""
     if [[ "$_MCP_CANCELLED" -eq 1 ]]; then
         # A cancelled call was already answered by its teardown, which sends no
@@ -939,26 +867,8 @@ _wait_tool_call() {
 
 # Poll the client's stdin while a tool child runs, so an in-flight tools/call
 # can be cancelled and so requests that arrive mid-call are answered in order
-# once it finishes.
-# A complete line that cancels this call runs the teardown and returns without
-# a response for the id; every other complete line — a cancellation naming
-# another id, a request, unparseable input — is queued verbatim for
-# handle_tools_call to replay through process_request.
-# EOF on stdin is not a cancellation: the call was accepted and its response is
-# still owed, so the loop stops reading, the child is awaited and reaped
-# normally, and the deferred lines above are replayed. A fragment left
-# unterminated by that EOF still gets its chance to be a line: when the joined
-# fragment already parses as a JSON document it is the client's last request,
-# written without a trailing newline that can never now arrive, and it is
-# treated as a line like any other — the cancellation check runs on it and it is
-# otherwise queued for replay. A fragment that is not JSON is dropped, since no
-# further byte can complete it, and only its length is logged, never its
-# content.
-# A fragment the loop is still holding when the child ends is not dropped: it
-# leaves the dispatch through _MCP_PARTIAL_FILE, which run_mcp_server reads
-# after this dispatch returns and joins to the next line it reads. Completing it
-# here instead would hold the dispatch — and with it the response the call has
-# already earned — behind a line the client might never finish.
+# once it finishes. Cancellation matching is docs/architecture.md §Cancellation;
+# the EOF and fragment rules are docs/architecture.md §Partial-line handoff.
 # Args: $1 = in-flight request id (JSON), $2 = child pid, $3 = tool name,
 #       $4 = original arguments JSON, $5 = tool output file
 # Sets: _MCP_CANCELLED (1 when the call was cancelled, else 0),
@@ -1153,31 +1063,15 @@ _run_cancel_hook() {
 }
 
 # Clear what is left of a tool's process group after its wrapper has been
-# reaped. Two members can outlive the tool: the lifeline sentinel, which sits on
-# the server's lifeline until every writer is gone rather than until the tool
-# ends, and any process the tool started and did not wait for. The group is the
-# tool's containment boundary, so both are cleared here — a tool cannot leave
-# something running behind a call that is over.
+# reaped: the group is the tool's containment boundary, so nothing the tool
+# started outlives the call. docs/architecture.md §Tool containment.
 #
-# The in-flight record is rewritten as its tombstone first, in one printf: the
-# same three fields with a literal `-` where the pgid was, so a teardown that
-# reads the record from here on signals nothing and only releases the two named
-# files. While any group member lives — the TERM-immune sentinel included — the
-# pgid cannot be handed to another process group, so the record may stay numeric
-# up to this point; this function is the one place the group is deliberately
-# emptied, and writing the tombstone ahead of the check-and-kill is what keeps
-# any path from emptying the group while the record still names it. The
-# tombstone lives here rather than at the caller because the caller reaches this
-# point only after the group has been signalled and reaped: a teardown landing
-# in that gap would read a numeric id for an emptied, recyclable group.
-# Accepted cost: a teardown that races this sliver removes the call's files
-# without signalling. The lifeline sentinel remains the containment backstop.
-# The tombstone is what a truncation cannot do: it keeps the tool name and the
-# output path, so a teardown landing after it still removes the call's files
-# rather than finding an empty record and leaving them behind.
-# A group with no live member is left alone rather than signalled: an id with
-# nobody in it can be handed to another process group, and testing for a live
-# member is what tells the two apart.
+# The tombstone is written ahead of the check-and-kill, not after it, because
+# this function is the one place the group is deliberately emptied: any other
+# order leaves a window where the group is empty and the record still names its
+# id. Accepted cost of that order — a teardown racing the same sliver removes
+# the call's files without signalling, and the lifeline sentinel remains the
+# containment backstop. docs/architecture.md §The in-flight record.
 # Args: $1 = the wrapper's pid, which is the group id it leads,
 #       $2 = the call's tool name, $3 = the call's output file path. The last
 #       two are empty when the group is not the call's own — the cancel hook's
@@ -1238,18 +1132,12 @@ _sentinel_pid_for() {
 # A group the kernel has already released is dead here too — the scan matches
 # nothing — but a caller that must not signal a recycled group id gates on
 # `kill -0 -- "-<pgid>"` for that, not on this.
-# The members come from a full `ps` listing filtered here rather than from
-# `pgrep -g` or a `ps` selection flag: BusyBox ships both binaries without
-# group selection, and its usage error exits 1 — the same status that means
-# "no members" — so a selecting call cannot tell an emptied group from a probe
-# that never ran. The full listing with `pid` and `pgid` columns is common to
-# procps, BSD and BusyBox `ps`. A `ps` that fails anyway — 127 for a binary
-# that is not there, or its own failure codes — is UNKNOWN, and an unknown
-# liveness degrades to the previous whole-group check rather than reading as an
-# empty group: read as empty it would end the caller's grace loop at once and
-# skip the SIGKILL that follows it, leaving a tool that ignores TERM alive. The
-# fallback counts the sentinel, so it costs the full grace — the safe
-# direction, which delays a kill rather than dropping it.
+# The members come from a full `ps` listing filtered here rather than from a
+# selecting call, which cannot tell an emptied group from a probe that never
+# ran. A `ps` that fails at all is unknown liveness, never an empty group: read
+# as empty it would end the caller's grace loop at once and skip the SIGKILL
+# after it, leaving a tool that ignores TERM alive.
+# docs/architecture.md §Cancellation.
 # Args: $1 = group id, $2 = sentinel pid (empty when unknown)
 _tool_group_has_live_member() {
     local pgid="$1"
@@ -1470,23 +1358,11 @@ process_request() {
 }
 
 # SIGKILL the tool's process group once the server is gone, however it went.
-# No trap can cover a server killed with SIGKILL or a shell that died with its
-# dispatch in flight, so the containment here is a file descriptor: the server
-# holds the lifeline FIFO read-write and never writes to it. Dispatch subshells
-# close their inherited copy before a wrapper starts, so the main server is the
-# only writer and this sentinel's blocking read returns EOF when it is gone.
+# This sentinel blocks on a read of the server's lifeline FIFO.
+# docs/architecture.md §The lifeline.
 # Nothing is ever expected to arrive on that read: a byte would end the wait
 # early and kill the group while the server is still alive, and the only writer
 # in this design never writes.
-# The group id comes from ps because every subshell inherits the main shell's
-# $$, and this sentinel shares the group of the wrapper that spawned it, so
-# neither $$ nor its own pid names the group it has to kill. It is read from a
-# full listing filtered by pid rather than a `-p` selection, which BusyBox `ps`
-# does not have.
-# It ignores TERM, INT and HUP: a cancellation TERMs the tool's whole group, and
-# a sentinel that died there would leave a tool group that ignores TERM with
-# nothing left to kill it once the server itself is gone. The group SIGKILL that
-# ends a cancellation reaps the sentinel with everything else in the group.
 _lifeline_sentinel() {
     local read_fd="$1"
 
@@ -1508,14 +1384,9 @@ _lifeline_sentinel() {
 }
 
 # Stop whatever the server still holds, however the server is going down.
-# The main shell cannot see into the command substitution a tool runs in, so an
-# in-flight call is found through the file handle_tools_call writes (the tool's
-# group, name, and output file) rather than through a variable. That group is
-# not this shell's child — it was the dispatch subshell's, and that subshell is
-# often already gone — so it is reaped by polling the group, never by `wait`.
-# Idempotent: every step is a no-op once its subject is gone, so the EXIT trap
-# can repeat what a signal trap already did, and a signal trap that already ran
-# the teardown leaves the EXIT trap nothing to do.
+# The in-flight group is not this shell's child — it was the dispatch
+# subshell's, and that subshell is often already gone — so it is reaped by
+# polling the group, never by `wait`. docs/architecture.md §Shutdown.
 _server_teardown() {
     # A signal that arrives while this is already running would otherwise enter
     # it a second time and re-signal a group, and re-run a hook, that the first
@@ -1569,9 +1440,8 @@ _server_teardown() {
     # created it, so a server going down on a signal has only the record to
     # reach it; the sentinel pid file beside it is derived from that same path
     # and is removed with it. This removal runs for a tombstone record too,
-    # which is the point of keeping the path in it. A record written before
-    # this change carries no output path, and a teardown that found no call to
-    # stop leaves nothing to remove either way.
+    # which is the point of keeping the path in it. A teardown that found no
+    # call to stop leaves nothing to remove either way.
     if [[ -n "${inflight_output}" ]]; then
         rm -f -- "${inflight_output}" "${inflight_sentinel_file}"
     fi
@@ -1610,15 +1480,9 @@ _server_teardown() {
 
     _MCP_TEARDOWN_RUNNING=0
 
-    # A signal that arrived while this ran was recorded by the signal trap
-    # instead of re-raised there, so this pass could finish: re-entering the
-    # teardown would run the cancel hook twice and signal a group this pass has
-    # already dealt with, and a re-raise mid-pass would end the shell before the
-    # SIGKILL above and the file removals below it. The recorded signal is what
-    # the shell now dies by, and only when this pass was itself driven by a
-    # signal trap — a teardown run from the EXIT trap or from the end of the
-    # read loop has no re-raise of its own for this to replace, so a signal
-    # recorded during it is left to the exit that is already under way.
+    # The signal a trap recorded while this pass ran is what the shell now dies
+    # by, and only when this pass was itself driven by a signal trap.
+    # docs/architecture.md §Shutdown.
     if [[ "${_MCP_TEARDOWN_FROM_TRAP:-0}" == "1" && -n "${_MCP_PENDING_SIGNAL:-}" ]]; then
         local pending_signal
         pending_signal="${_MCP_PENDING_SIGNAL}"
@@ -1694,22 +1558,13 @@ run_mcp_server() {
     export _MCP_LIFELINE_DIR="$lifeline_dir"
     exec {_MCP_LIFELINE_FD}<>"${lifeline_dir}/lifeline"
 
-    # Known and accepted limitation, at the point it bites: bash runs a trap
-    # only between foreground commands, so a signal sent to this shell's pid
-    # alone while a dispatch runs takes effect when that dispatch returns. The
-    # in-flight call therefore finishes first, and the teardown then finds the
-    # tool already reaped. A supervisor that signals the whole process group —
-    # the common case — kills the dispatch subshell immediately, the command
-    # substitution returns, and this trap runs while the tool group is still
-    # alive and reaps it. Neither shape needs the working directory or the log
-    # to be intact, so both run the same teardown.
-    # The four signal traps share _mcp_teardown_on_signal, which re-raises with
-    # the default disposition restored so the exit status reports death by
-    # signal rather than a plain zero; the EXIT trap only tears down, and a
-    # teardown a signal trap already ran leaves it nothing to do.
-    # run_mcp_server takes over the process's EXIT trap, replacing any handler
-    # already installed, and expects to be that process's last call. A caller
-    # that needs its own EXIT trap afterwards runs the server in a subshell.
+    # Known and accepted limitation, at the point it bites: a signal to this
+    # shell's pid alone while a dispatch runs takes effect only when that
+    # dispatch returns, so the in-flight call finishes first and the teardown
+    # then finds the tool already reaped. README.md §Cancelling and shutting
+    # down.
+    # These five traps replace any handler the caller installed on the same
+    # signals, EXIT included. AGENTS.md §Stdout discipline.
     trap '_server_teardown' EXIT
     trap '_mcp_teardown_on_signal INT' INT
     trap '_mcp_teardown_on_signal TERM' TERM
@@ -1753,16 +1608,9 @@ run_mcp_server() {
             local eof_fragment
             eof_fragment="${partial}${line}"
             partial=""
-            # The parse test is `jq empty`, which exits zero on any parseable
-            # input: `jq -e '.'` set its status from the truthiness of the
-            # output, so a fragment of `false` or `null` — both valid JSON —
-            # read as a parse failure and was dropped. `jq empty` also exits
-            # zero on input holding no documents, the empty string and
-            # whitespace-only input alike, so the joined fragment need not hold
-            # one: the branch's `-n "$partial"` guard excludes only the empty
-            # string, and a whitespace-only fragment is handed on and answered
-            # -32700 — the same answer the same bytes get when a newline
-            # follows them.
+            # `jq empty`, not `jq -e '.'`: `-e` takes its status from the
+            # output's truthiness, so a fragment of `false` or `null` read as a
+            # parse failure. Full reason at the same test in _await_tool_call.
             if ! printf '%s\n' "$eof_fragment" | jq empty >/dev/null 2>&1; then
                 log "WARN" "Discarding a partial line of ${#eof_fragment} characters left by EOF"
                 break

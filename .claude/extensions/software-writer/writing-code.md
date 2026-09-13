@@ -3,13 +3,13 @@
 - `project.stacks` =
   | Stack | Where | Toolchain |
   |---|---|---|
-  | bash | `lib/mcpserver_core.sh`, `tests/**/*.bats`, `tests/test_helper/*.bash`, `scripts/`, `.github/scripts/` | bash 4.0+ for the SDK and its tests; bash 3.2+ for `.github/scripts/` (runs on stock macOS); `jq`; ShellCheck v0.11.0 pinned in CI |
+  | bash | `lib/mcpserver_core.sh`, `tests/**/*.bats`, `tests/test_helper/*.bash`, `scripts/`, `.github/scripts/` | bash 4.1+ for the SDK and its tests, enforced by the pre-flight guard when the file is sourced; bash 3.2+ for `.github/scripts/` and for the guard block itself (both run on stock macOS); `jq` 1.7+; ShellCheck v0.11.0 pinned in CI |
 
   No other stack is in play. The whole product is one bash file; everything else in the tree tests or ships it.
 - `code.primitives` =
   | Call shape | Reach for | In-repo helper | Reason the wrapper exists |
   |---|---|---|---|
-  | Read a JSON file the server owns | `cat "$file"` | `read_json_file` (`lib/mcpserver_core.sh`) | A missing file logs an ERROR and yields `{}` rather than emitting nothing into a `jq` pipeline. |
+  | Read a JSON file the server owns | `cat "$file"` | `read_json_file` (`lib/mcpserver_core.sh`) | Requires exactly one JSON object; a missing, empty, multi-document, unparseable or non-object file logs an ERROR, prints nothing and returns 1, so a caller answers `-32603` instead of reading a broken configuration as an empty one. |
   | Emit a JSON-RPC result or error | building the JSON string by hand | `create_response`, `create_error_response` (`lib/mcpserver_core.sh`) | `jq -n -c` does the escaping, and the JSON-RPC 2.0 envelope is written once. |
   | Record a diagnostic | `echo … >> "$logfile"` | `log` (`lib/mcpserver_core.sh`) | Adds the timestamp and level, dual-writes to `MCP_EXTRA_LOG_FILE` when set, and always returns 0 so a log call cannot trip `set -e`. |
   | Check a call's arguments against a schema | ad-hoc `jq` at the call site | `validate_tool_arguments` (`lib/mcpserver_core.sh`) | Enforces the whole `inputSchema` with diagnostics in precedence order missing > unknown > type > pattern > range > items > enum, and treats a jq failure as a rejection, never a skip. |
@@ -18,7 +18,7 @@
 - `code.export_conventions` = A leading `_` marks an internal function (`_configure_extra_log_file`); every unprefixed function, its argument order, what it writes to stdout, and the consumer-set variables are public API governed by `AGENTS.md` §Compatibility contract. Classify every surface change against that contract before writing it: rename, argument-order, or stdout change is a major bump; a new function, handled method, or enforced schema keyword is a minor bump; tightening the validator is a major bump even though it fixes a hole. A consumer exports a tool by doing both: defining `tool_<name>` and adding a `tools.json` entry with an `inputSchema` — an entry without a schema is dispatched unvalidated.
 - `code.footgun_additions` =
   - **Stdout is the JSON-RPC stream.** Anything written to stdout outside `create_response` / `create_error_response` corrupts the protocol. `validate_tool_arguments` is the one deliberate exception: it prints a human-readable diagnostic and returns 1, which `handle_tools_call` captures into an `isError` result.
-  - A tool function is dispatched as `output=$("$func_name" "$arguments" 2>&1) || exit_code=$?`. Three consequences: errexit is disabled inside every tool function (Bash turns `set -e` off in a tested command), so each step's status must be checked explicitly; stderr is merged into the result the client sees, not discarded; and the function inherits the server's stdin — the client's JSON-RPC pipe — so a stdin-reading child blocks forever or consumes protocol bytes.
+  - A tool function is dispatched in a background wrapper subshell that redirects to the call's output file: `( set +e; _reset_tool_dispatch_state; "$func_name" "$arguments" ) >"$output_file" 2>&1 </dev/null &`. Three consequences: errexit is disabled inside every tool function, so each step's status must be checked explicitly; stderr is merged into the result the client sees, not discarded; and the function's stdin is `/dev/null`, so a read returns EOF rather than consuming the client's JSON-RPC pipe.
   - jq's `//` treats a present `null` and a present `false` as absent. `handle_tools_call` derives arguments with `has("arguments")` for exactly this reason; keep that shape wherever the null/false distinction matters.
   - A jq `as` binding over zero outputs skips its entire body. The validator's `items` checks read `.type`/`.enum` by plain field access instead of `// empty` because of it — `// empty` on an absent key would silently discard every element, including violations of the constraint that was declared.
   - `lib/mcpserver_core.sh` sources nothing, and `tests/core_standalone.bats` fails when a dependency is introduced. A change that needs a helper from outside the file does not belong in this repository.
@@ -36,6 +36,7 @@
   | `README.md` | Pitch, requirements, install, the API and configuration-variable tables, the writing-a-server guide, the vendoring recipe, test commands, the not-supported list, license pointer | Emoji-prefixed H2s | enforced |
   | `AGENTS.md` | Agent routing (Before-editing pointers, the Navigation table), the scope boundary, the compatibility contract, the stdout discipline, testing conventions, the release procedure | Orientation line, `## Before editing`, `## Navigation`, then the machine-owned H2 sections; never inlines `README.md` — it points into it by `§Heading` | enforced |
   | `SECURITY.md` | Vulnerability reporting, the DevSec baseline, the consumer-code clarification | H2 sections separated by rules | enforced |
+  | `docs/architecture.md` | The cross-function runtime design: request lifecycle, tool containment, the lifeline sentinel, the in-flight record and its tombstone, cancellation, shutdown, the partial-line handoff, and the invariant-to-owner index | Orientation paragraph, then the fixed H2 set; states mechanism only, never the consumer contract `README.md` owns | enforced |
   | `CLAUDE.md` | Nothing of its own | A single `@AGENTS.md` line | exempt — a committed include, never carries content |
   | `CHANGELOG.md` | The per-version record of what changed | Keep a Changelog: `## [Unreleased]`, then `## [X.Y.Z] - YYYY-MM-DD` with `### Added` / `### Changed` / `### Fixed` | exempt — a version entry necessarily restates what the other surfaces describe as current behavior |
 
