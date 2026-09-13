@@ -4,12 +4,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
-### Fixed
+## [5.0.0] - 2026-09-13
 
-- Sourcing `lib/mcpserver_core.sh` under a Bash below 4.1 is refused as the file is sourced. The message names the floor, the version found, and the platform's install command where one can be determined. Such a shell previously failed much later, inside `run_mcp_server`, with an error an MCP host reports as nothing more than a server that failed to start. The floor itself is unchanged and was already stated in `README.md` §Requirements.
-- Sourcing the file with `jq` missing, or older than 1.7, is refused the same way. Such a server previously started and answered every request, while `validate_tool_arguments` returned the pre-3.0.0 verdict for a declared `integer`. That check needs the number-literal preservation jq added in 1.7.
-- A `jq` that is present but cannot run is named as such, with the path it resolved to. It was previously reported as an outdated jq, so the refusal advised upgrading a package that was already current.
-- Both floors are read when the file is sourced, so `PATH` must select the intended Bash and `jq` at that point. A server script that repairs `PATH` after sourcing has to move that line above the `source`. An operator who cannot edit the script sets `PATH` in the host manifest's launch command instead. `README.md` §Requirements carries both forms.
+### Changed
+
+- **Major**: sourcing `lib/mcpserver_core.sh` under a Bash below 4.1 is refused as the file is sourced. The message names the floor, the version found, and the platform's install command where one can be determined. Such a shell previously failed much later, inside `run_mcp_server`, with an error an MCP host reports as nothing more than a server that failed to start. The floor itself is unchanged and was already stated in `README.md` §Requirements.
+- **Major**: sourcing the file with `jq` missing, or older than 1.7, is refused the same way. Such a server previously started and answered every request, while `validate_tool_arguments` returned the pre-3.0.0 verdict for a declared `integer`. That check needs the number-literal preservation jq added in 1.7.
+- **Major**: sourcing the file with a `jq` that is present but cannot run is refused as its own case. The message names the path `command -v jq` resolved and reports that the binary did not answer `jq --version`. It leaves out the distribution-package warning, which applies only to a `jq` that reports a version below the floor.
+- **Major**: both floors are read when the file is sourced, so `PATH` must select the intended Bash and `jq` at that point. A server script that repairs `PATH` after sourcing has to move that line above the `source`. An operator who cannot edit the script sets `PATH` in the host manifest's launch command instead. `README.md` §Requirements carries both forms.
 
 ## [4.0.0] - 2026-09-13
 
@@ -67,7 +69,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - BATS suites covering the validator, the logging surface, and the guarantee that the file sources nothing and serves the protocol on its own.
 - ShellCheck and BATS in CI.
 
-[Unreleased]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v4.0.0...HEAD
+[Unreleased]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.0.0...HEAD
+[5.0.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v4.0.0...v5.0.0
 [4.0.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v1.0.0...v2.0.0
