@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+
+- Sourcing `lib/mcpserver_core.sh` under a Bash below 4.1 is refused with a message naming the floor, the version found, and remediation for the platform — its package manager's command where one can be determined, a generic line otherwise. The file parses under Bash 3.2, so the unchecked floor surfaced only once `run_mcp_server` reached its `{var}` descriptor allocation and died with `exec: {_MCP_LIFELINE_FD}: not found` and status 127 — which an MCP host reports as nothing more than a server that failed to start. The floor is unchanged and was already stated in `README.md` §Requirements.
+- Sourcing `lib/mcpserver_core.sh` with `jq` missing, or older than 1.7, is refused the same way. Such a server previously started and answered every request while `validate_tool_arguments` returned the pre-3.0.0 verdict for a declared `integer`: deciding one from the number as jq renders it needs the literal preservation jq added in 1.7, and below that floor every number is parsed to a double. Both floors were already stated in `README.md` §Requirements.
+- A `jq` that is present but cannot run — wrong architecture, missing shared library — is named as such, with the path it resolved to, rather than reported as an outdated one. `command -v jq` succeeds for such a binary, so the version probe came back empty and the refusal advised upgrading a package that was already current.
+- The floors are read when the file is sourced, so `PATH` has to select the intended `jq` and Bash at that point. A server script that repaired `PATH` after sourcing has to move that line above the `source`; an operator who cannot edit the script sets `PATH` in the host manifest's launch command, which also selects the Bash the server runs under. `README.md` §Requirements carries both forms.
+
 ## [4.0.0] - 2026-09-13
 
 ### Added

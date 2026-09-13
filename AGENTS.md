@@ -8,6 +8,7 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 - Classify every change to a public name, argument order, or stdout shape before writing it (§Compatibility contract).
 - `lib/mcpserver_core.sh` sources nothing and serves the protocol alone (§Scope).
 - Every change to the file extends its BATS suite in the same commit (§Testing).
+- The pre-flight block at the top of `lib/mcpserver_core.sh` must parse and run under every version it rejects (§Pre-flight guards).
 - A public-surface change also updates the API and configuration tables (`README.md` §API) and gets a `CHANGELOG.md` entry classified per §Compatibility contract.
 
 ## Navigation
@@ -15,6 +16,7 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 | Path | Role |
 |---|---|
 | `lib/mcpserver_core.sh` | The SDK — the only file consumers vendor; every unprefixed function is public API (`README.md` §API) |
+| `tests/preflight.bats` | Pins the dependency guards: the Bash and `jq` floor comparisons, the refusals a missing, unrunnable or too-old dependency produces, the per-platform install hint, and that the block sits above the file's own `set -euo pipefail` so a refusal leaves the caller's shell options untouched |
 | `tests/core_standalone.bats` | Pins the boundary: the file sources nothing, a server needs no other file |
 | `tests/exit_trap_isolation.bats` | Pins that `run_mcp_server`'s EXIT trap stays with the shell that runs it: a caller that isolates the call in a subshell keeps its own EXIT trap, and that subshell is where the post-loop reset of `_MCP_IN_SERVER_LOOP` is observable |
 | `tests/mcp_argument_validation.bats` | Pins the validator, including its diagnostic precedence |
@@ -53,7 +55,15 @@ Tightening the validator is a **major** bump even though it fixes a hole: argume
 
 ## Stdout discipline
 
-Stdout carries the JSON-RPC stream. `run_mcp_server` captures each dispatch's stdout and echoes it, so only response construction writes there: `create_response`, `create_error_response`, and the deferred responses `handle_tools_call` replays for requests that arrived mid-call. Diagnostics go to `log`. `read_json_file` prints the parsed document, and every call site captures it in a command substitution, so that output never reaches the protocol stream. `validate_tool_arguments` is the one deliberate exception — it prints a human-readable message and returns 1, which `handle_tools_call` turns into an `isError` result. `run_mcp_server` also takes over the process's EXIT trap, replacing any handler already installed, and expects to be that process's last call; a caller that needs its own EXIT trap afterwards runs the server in a subshell.
+Stdout carries the JSON-RPC stream. `run_mcp_server` captures each dispatch's stdout and echoes it, so only response construction writes there: `create_response`, `create_error_response`, and the deferred responses `handle_tools_call` replays for requests that arrived mid-call. Diagnostics go to `log`. `read_json_file` prints the parsed document, and every call site captures it in a command substitution, so that output never reaches the protocol stream. `_mcp_install_hint` prints its remediation lines to stdout so the function stays pure and directly testable; every call site redirects them to stderr with `>&2`, which keeps them off the protocol stream, and a new call site has to add that redirect. `validate_tool_arguments` is the one deliberate exception — it prints a human-readable message and returns 1, which `handle_tools_call` turns into an `isError` result. `run_mcp_server` also takes over the process's EXIT trap, replacing any handler already installed, and expects to be that process's last call; a caller that needs its own EXIT trap afterwards runs the server in a subshell.
+
+## Pre-flight guards
+
+The top of `lib/mcpserver_core.sh` enforces the dependency floors in `README.md` §Requirements, before `set -euo pipefail` and before anything else runs.
+
+Two constraints bind every edit to that block. It must parse and run under every version it rejects, so it uses no construct newer than Bash 3.2 — a rejected version that cannot parse the guard never reaches it. And its diagnostics go to stderr, both because stdout carries the protocol (§Stdout discipline) and because no protocol error is constructible there: `create_error_response` builds every envelope with `jq`.
+
+Bash arithmetic and the `jq` version comparison sit in `_mcp_`-prefixed helpers that take their input as arguments, which is what makes them testable. `BASH_VERSINFO` is readonly, so a suite cannot fake a version in-process; the Bash arm is covered end to end only where the machine carries a Bash below 4.1, and `tests/preflight.bats` skips that case everywhere else. The CI matrix has no leg pinned to an old Bash — the Dockerfiles take a `JQ_VERSION` build arg and no Bash equivalent — so there only the comparison is covered, not the wiring around it.
 
 ## Testing
 
