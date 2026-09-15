@@ -1,11 +1,12 @@
 #!/usr/bin/env bats
 # bats file_tags=mcp-core,standalone
 # Pins run_mcp_server's ownership of the process EXIT trap and the reset of
-# _MCP_IN_SERVER_LOOP it performs after the loop exits. run_mcp_server sets
-# its own EXIT trap, replacing whatever handler the shell already had; a caller
-# that runs it in a subshell keeps its own trap, so a suite calling it in the
-# test shell must isolate it there or lose bats' reporting trap and drop the
-# test silently when the body later aborts.
+# _MCP_IN_SERVER_LOOP it performs after the loop exits. run_mcp_server installs
+# its own EXIT trap, and in the direct shape it chains whatever handler the
+# shell already had into that teardown; a caller that runs it in a subshell
+# keeps its own trap there, unchained, so a suite calling it in the test shell
+# must isolate it there or lose bats' reporting trap and drop the test silently
+# when the body later aborts.
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"

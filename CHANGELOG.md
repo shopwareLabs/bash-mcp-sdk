@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+
+- `run_mcp_server` chains a consumer's pre-installed `EXIT` trap into server teardown in the direct call shape. The handler is no longer dropped: the server runs it after its own cleanup, on a clean exit and on a trapped signal alike. The handler gets the same grace a cancel hook gets, so one that overruns is killed and logged rather than stalling shutdown. It runs without errexit, so it checks each step's status itself. Its stdout goes to stderr, because stdout carries the JSON-RPC stream, and a handler that fails is logged rather than aborting the teardown or changing the server's exit status. The four signal handlers are still replaced.
+
+### Fixed
+
+- Under `set -o posix`, an unset `EXIT` trap is reported as `trap -- - EXIT`, and the capture stored the `-` as the handler. Teardown then ran `eval "-"`, and every shutdown logged a `command not found` warning. A non-empty capture other than the bare `-` is now the only thing stored.
+- A signal recorded during a clean-exit teardown now ends the shell by that signal, as the contract states. The re-raise ran only when a signal trap had driven the pass, so a signal recorded during the teardown that follows a closed stdin was dropped and the server exited 0.
+
 ## [5.0.0] - 2026-09-13
 
 ### Changed

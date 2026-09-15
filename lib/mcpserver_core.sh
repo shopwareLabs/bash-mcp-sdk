@@ -1478,19 +1478,66 @@ _server_teardown() {
         _MCP_LIFELINE_DIR=""
     fi
 
+    # The caller's own EXIT handler runs here, after the SDK has released its
+    # files: the one point both routes into this function reach with the cleanup
+    # done and the shell still alive. It runs in its own background group under
+    # the cancel-hook grace, because bash defers a trapped signal until a
+    # foreground subshell finishes, so a handler that blocked would stall
+    # shutdown — an overrun is killed and logged. `set +e` and a logged, not
+    # returned, failure give it the no-errexit shape its contract states. Its
+    # stdout goes to stderr, and its stdin is `/dev/null` rather than the
+    # inherited client stream a handler could otherwise consume. The variable is
+    # cleared after the one run, so no later pass over this function — the
+    # loop's own teardown, then the EXIT trap — can run the handler a second
+    # time. docs/architecture.md §Shutdown.
+    if [[ -n "${_MCP_CHAINED_EXIT_TRAP:-}" ]]; then
+        local chained_pid=""
+        local chained_waited=0
+        local chained_status=0
+        local chained_monitor_was_enabled=0
+        if [[ -o monitor ]]; then
+            chained_monitor_was_enabled=1
+        fi
+        set -m
+        ( set +e; eval "${_MCP_CHAINED_EXIT_TRAP}" ) >&2 </dev/null &
+        chained_pid=$!
+        if [[ "$chained_monitor_was_enabled" == "1" ]]; then
+            set -m
+        else
+            set +m
+        fi
+        while kill -0 "$chained_pid" 2>/dev/null \
+            && [[ $chained_waited -lt $((_MCP_CANCEL_GRACE_SECONDS * 10)) ]]; do
+            sleep 0.1
+            chained_waited=$((chained_waited + 1))
+        done
+        if kill -0 "$chained_pid" 2>/dev/null; then
+            kill -KILL -- "-$chained_pid" 2>/dev/null || true
+            wait "$chained_pid" || true
+            log "WARN" "Chained caller EXIT trap did not finish within ${_MCP_CANCEL_GRACE_SECONDS}s; killed"
+        else
+            wait "$chained_pid" || chained_status=$?
+            if [[ $chained_status -ne 0 ]]; then
+                log "WARN" "Chained caller EXIT trap failed with status ${chained_status}"
+            fi
+            _kill_tool_group "$chained_pid" "" ""
+        fi
+        _MCP_CHAINED_EXIT_TRAP=""
+    fi
+
     _MCP_TEARDOWN_RUNNING=0
 
-    # The signal a trap recorded while this pass ran is what the shell now dies
-    # by, and only when this pass was itself driven by a signal trap.
-    # docs/architecture.md §Shutdown.
-    if [[ "${_MCP_TEARDOWN_FROM_TRAP:-0}" == "1" && -n "${_MCP_PENDING_SIGNAL:-}" ]]; then
+    # A signal a trap recorded while this pass ran is what the shell now dies
+    # by. The re-raise runs at the end of every pass, not only a trap-driven
+    # one, so a signal recorded during a clean-exit teardown still ends the
+    # shell by that signal. docs/architecture.md §Shutdown.
+    if [[ -n "${_MCP_PENDING_SIGNAL:-}" ]]; then
         local pending_signal
         pending_signal="${_MCP_PENDING_SIGNAL}"
         _MCP_PENDING_SIGNAL=""
         trap - "$pending_signal"
         kill -s "$pending_signal" "$BASHPID"
     fi
-    _MCP_TEARDOWN_FROM_TRAP=0
     return 0
 }
 
@@ -1511,7 +1558,6 @@ _mcp_teardown_on_signal() {
         return 0
     fi
 
-    _MCP_TEARDOWN_FROM_TRAP=1
     _server_teardown
     trap - "$signal"
     kill -s "$signal" "$BASHPID"
@@ -1563,8 +1609,40 @@ run_mcp_server() {
     # dispatch returns, so the in-flight call finishes first and the teardown
     # then finds the tool already reaped. README.md §Cancelling and shutting
     # down.
-    # These five traps replace any handler the caller installed on the same
-    # signals, EXIT included. AGENTS.md §Stdout discipline.
+    # The EXIT handler a caller installed before this call is kept rather than
+    # dropped: the trap below replaces it, and the teardown runs it afterwards.
+    # Captured only in the shell the caller's trap was installed in — a caller
+    # that isolates this call in a subshell keeps its handler in the parent, and
+    # chaining it from the subshell would run it in two shells. A plain variable
+    # rather than a `local`, because the EXIT trap reads it after this function
+    # has returned. docs/architecture.md §Shutdown.
+    _MCP_CHAINED_EXIT_TRAP=""
+    if [[ "${BASHPID}" == "$$" ]]; then
+        # A bash subshell inherits its parent's trap table, and `trap -p` reports
+        # the parent's handler until the subshell itself changes a trap — so
+        # this substitution's subshell reports this shell's own handler, and the
+        # handler does not run there. Should a future bash reset traps in a
+        # subshell the way POSIX describes, this capture would come back empty
+        # and a handler would be missed, never fired a second time.
+        local incumbent_trap_text
+        incumbent_trap_text=$(trap -p EXIT)
+        # An empty capture is a shell with no EXIT handler; under `set -o posix`
+        # an unset trap reports `trap -- - EXIT`, whose `-` is not a handler.
+        # Both store nothing.
+        if [[ -n "${incumbent_trap_text}" ]]; then
+            # The re-input form is `trap -- '<handler>' EXIT`, so the handler is
+            # the third word once that line is parsed as the shell would.
+            eval "set -- ${incumbent_trap_text}"
+            if [[ -n "${3-}" && "${3-}" != "-" ]]; then
+                _MCP_CHAINED_EXIT_TRAP="${3-}"
+            fi
+        fi
+    fi
+
+    # The caller's handler on a signal is replaced here: it expects the shell to
+    # keep running, and this shell has to die by the signal. The EXIT trap is
+    # the SDK's own, and the caller's EXIT handler runs from the teardown
+    # instead. docs/architecture.md §Shutdown.
     trap '_server_teardown' EXIT
     trap '_mcp_teardown_on_signal INT' INT
     trap '_mcp_teardown_on_signal TERM' TERM

@@ -7,6 +7,7 @@
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
+load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 CORE_SH="${REPO_ROOT}/lib/mcpserver_core.sh"
 
@@ -33,21 +34,14 @@ JSON
 }
 JSON
 
-    cat > "${BATS_TEST_TMPDIR}/server.sh" <<SERVER
-#!/usr/bin/env bash
-set -euo pipefail
-export MCP_CONFIG_FILE="${BATS_TEST_TMPDIR}/config.json"
-export MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
-export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-source "${CORE_SH}"
+    write_server "${BATS_TEST_TMPDIR}/server.sh" <<'BODY'
 tool_greet() {
-    local args="\$1"
+    local args="$1"
     local name
-    name=\$(printf '%s' "\$args" | jq -r '.name')
-    printf 'Hello, %s\n' "\$name"
+    name=$(printf '%s' "$args" | jq -r '.name')
+    printf 'Hello, %s\n' "$name"
 }
-run_mcp_server
-SERVER
+BODY
 }
 
 # Drive the standalone server with one request, return its single response line.
