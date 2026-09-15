@@ -1478,6 +1478,22 @@ _server_teardown() {
         _MCP_LIFELINE_DIR=""
     fi
 
+    # The caller's own EXIT handler runs here, after the SDK has released its
+    # files and before a signal this pass recorded is re-raised: that is the one
+    # point both ways out of this function reach with the cleanup done and the
+    # shell still alive. Its stdout goes to stderr, because stdout carries the
+    # JSON-RPC stream, and its failure is logged rather than returned — a
+    # caller's broken cleanup must not abort this teardown or change the
+    # server's exit status. The subshell keeps the handler's own errexit and its
+    # variable assignments out of this shell.
+    # The variable is cleared after the one run, so no later pass over this
+    # function — the loop's own teardown, then the EXIT trap — can run the
+    # handler a second time. docs/architecture.md §Shutdown.
+    if [[ -n "${_MCP_CHAINED_EXIT_TRAP:-}" ]]; then
+        ( eval "${_MCP_CHAINED_EXIT_TRAP}" ) >&2 || log "WARN" "Chained caller EXIT trap failed with status $?"
+        _MCP_CHAINED_EXIT_TRAP=""
+    fi
+
     _MCP_TEARDOWN_RUNNING=0
 
     # The signal a trap recorded while this pass ran is what the shell now dies
@@ -1563,8 +1579,41 @@ run_mcp_server() {
     # dispatch returns, so the in-flight call finishes first and the teardown
     # then finds the tool already reaped. README.md §Cancelling and shutting
     # down.
-    # These five traps replace any handler the caller installed on the same
-    # signals, EXIT included. AGENTS.md §Stdout discipline.
+    # The EXIT handler a caller installed before this call is kept rather than
+    # dropped: the trap below replaces it, and the teardown runs it afterwards.
+    # Captured only in the shell the caller's trap was installed in — a caller
+    # that isolates this call in a subshell keeps its handler in the parent, and
+    # chaining it from the subshell would run it in two shells. A plain variable
+    # rather than a `local`, because the EXIT trap reads it after this function
+    # has returned. docs/architecture.md §Shutdown.
+    _MCP_CHAINED_EXIT_TRAP=""
+    if [[ "${BASHPID}" == "$$" ]]; then
+        # `trap -p EXIT` prints the handler in re-input form. The report is read
+        # through a file rather than a command substitution: the substitution
+        # runs in a subshell, where reporting the parent's handler is a bash
+        # special case, and this capture has to be the current shell's own
+        # answer.
+        local incumbent_trap_file incumbent_trap_text
+        incumbent_trap_file=$(mktemp "${TMPDIR:-/tmp}/mcp-exit-trap.XXXXXX")
+        trap -p EXIT > "${incumbent_trap_file}"
+        incumbent_trap_text=$(<"${incumbent_trap_file}")
+        rm -f -- "${incumbent_trap_file}"
+        # An empty capture is a shell that had installed no EXIT handler, and it
+        # leaves the storage variable empty. The eval is skipped with it: with no
+        # words to parse there is no third one to take for the handler, and
+        # parsing nothing would only clear positional parameters this function
+        # does not read.
+        if [[ -n "${incumbent_trap_text}" ]]; then
+            # The re-input form is `trap -- '<handler>' EXIT`, so the handler is
+            # the third word once that line is parsed as the shell would.
+            eval "set -- ${incumbent_trap_text}"
+            _MCP_CHAINED_EXIT_TRAP="${3-}"
+        fi
+    fi
+
+    # The four signal traps replace any handler the caller installed on those
+    # signals. The EXIT trap is the SDK's own, and the caller's handler runs
+    # from the teardown instead. AGENTS.md §Stdout discipline.
     trap '_server_teardown' EXIT
     trap '_mcp_teardown_on_signal INT' INT
     trap '_mcp_teardown_on_signal TERM' TERM

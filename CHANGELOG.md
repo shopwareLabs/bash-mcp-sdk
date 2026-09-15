@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+
+- `run_mcp_server` chains a consumer's pre-installed `EXIT` trap into server teardown in the direct call shape. The handler is no longer dropped: the server runs it after its own cleanup, on a clean exit and on a trapped signal alike. The handler's stdout goes to stderr, because stdout carries the JSON-RPC stream, and a handler that fails is logged rather than aborting the teardown or changing the server's exit status. The four signal handlers are still replaced.
+
 ## [5.0.0] - 2026-09-13
 
 ### Changed
