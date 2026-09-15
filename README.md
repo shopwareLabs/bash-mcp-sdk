@@ -116,6 +116,21 @@ Two properties of tool dispatch to write against:
 - A tool function always runs with errexit disabled, on every dispatch path. That holds under `run_mcp_server` and from a direct call to `process_request` or `handle_tools_call` alike. A failing step does not end the tool. Check each step's status yourself and return non-zero to produce the `isError` result.
 - A tool function's stdin is `/dev/null`. A read returns EOF instead of blocking on the server's protocol stream or consuming bytes meant for it.
 
+A tool cannot leave a value in a variable for a later call to read. Each call runs in its own subshell, so what a tool sets dies with that call (the boundary is in `docs/architecture.md` §Request lifecycle and §Tool containment). State that crosses calls travels through a file.
+
+The server script creates that file above the `source` line and exports its path. Every tool subshell inherits the export, so all tools read and write the same path:
+
+```bash
+MYSERVER_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/myserver-state.XXXXXX")"
+export MYSERVER_STATE_FILE
+```
+
+The name is the server's own, kept out of the library's `MCP_*` namespace.
+
+Inside a tool, `$$` is the server's pid while `BASHPID` is the per-call subshell's pid. A filename keyed on `$$` is therefore shared by every call, and one keyed on `BASHPID` is not. A tool that detaches into a new session outlives its call, so it can still be writing the file while a later call runs.
+
+Removing the file is the server script's job. *Cancelling and shutting down* below gives the traps `run_mcp_server` installs, the subshell the server script uses to keep its own, and what a `SIGKILL` leaves behind.
+
 ### Cancelling and shutting down
 
 A client cancels an in-flight call by sending `notifications/cancelled` with the request's id in `params.requestId`. The server stops the tool's process group with `SIGTERM`, then `SIGKILL` for whatever is left of it, and sends no response for that id. A cancellation that names nothing in flight is logged and dropped. A tool that dies on the `SIGTERM` is reaped at once rather than after the two-second grace (measured as in `docs/architecture.md` §Cancellation).
@@ -128,7 +143,11 @@ A tool may define an optional `tool_<name>_cancel` hook. It runs with the call's
 
 The hook runs before the group is signalled, and each of the two steps gets its own two seconds. A hook that runs longer than two seconds is killed, and its exit status is logged rather than failing the call. A wedged hook followed by a group that ignores `SIGTERM` therefore holds a cancellation for about four seconds before the final `SIGKILL`.
 
-`run_mcp_server` installs `EXIT`, `INT`, `TERM`, `HUP` and `PIPE` traps, replacing any handler a consumer set on those signals. It expects to be the last call in its process; a server that needs its own `EXIT` trap afterwards calls `run_mcp_server` in a subshell. A signal to the server's whole process group takes effect at once. One sent to the server's pid alone mid-call takes effect after that call returns, and lets it finish.
+`run_mcp_server` installs `EXIT`, `INT`, `TERM`, `HUP` and `PIPE` traps. The four signal traps replace any handler a consumer set on those signals, because a signal handler that expects the shell to keep running cannot be honored: the shell has to die by the signal. The `EXIT` trap is the server's own, and a consumer's `EXIT` handler is not lost with it: the server runs that handler as part of its teardown, after its own cleanup, on a clean exit and on a trapped signal alike.
+
+A consumer's `EXIT` handler runs under these rules. Its stdout goes to stderr, because stdout is the protocol channel, and its stdin is `/dev/null` rather than the client's JSON-RPC stream, so a handler that read cannot consume protocol bytes. It runs without errexit, so it checks each step's status itself (the same shape as the tool-function rule above). A failure is logged, and it neither aborts the teardown nor changes the server's exit status. It gets the same two-second grace a cancel hook gets, and one that runs longer is killed and logged. It runs before `run_mcp_server` returns on a clean exit. It may run in a subshell, so it cannot count on a variable it sets or a directory it changes outliving it. And only a handler installed in the shell that calls `run_mcp_server` directly is chained: a trap installed inside a subshell that wraps the whole call, `source` and all, is still replaced and dropped.
+
+`run_mcp_server` expects to be the last call in its process, so a server that needs its own `EXIT` trap afterwards calls it in a subshell. That wrap has a cost: a signal to the parent's pid alone finds no server trap there, so the SDK's teardown inside the subshell never runs for that signal. The parent's own `EXIT` trap still does — bash runs a shell's `EXIT` trap when the shell dies by an untrapped fatal signal, and the exit status still reports that signal. A signal to the process group, or a client that closes stdin, still reaches the server inside the subshell. A signal to the server's whole process group takes effect at once. One sent to the server's pid alone mid-call takes effect after that call returns, and lets it finish.
 
 Both shapes stop the tool group before the server exits. A signal that arrives while a teardown is already running does not cut it short. That pass finishes, and the shell then dies by the signal.
 
