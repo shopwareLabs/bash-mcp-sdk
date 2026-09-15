@@ -4,9 +4,11 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-09-15
+
 ### Changed
 
-- `run_mcp_server` chains a consumer's pre-installed `EXIT` trap into server teardown in the direct call shape. The handler is no longer dropped: the server runs it after its own cleanup, on a clean exit and on a trapped signal alike. The handler gets the same grace a cancel hook gets, so one that overruns is killed and logged rather than stalling shutdown. It runs without errexit, so it checks each step's status itself. Its stdout goes to stderr, because stdout carries the JSON-RPC stream, and a handler that fails is logged rather than aborting the teardown or changing the server's exit status. The four signal handlers are still replaced.
+- `run_mcp_server` chains a consumer's pre-installed `EXIT` trap into server teardown in the direct call shape. The handler is no longer dropped: the server runs it after its own cleanup, on a clean exit and on a trapped signal alike. Only a handler installed in the shell that calls `run_mcp_server` is chained. One installed inside a subshell that wraps the call is still replaced and dropped. The handler gets the same grace a cancel hook gets, so one that overruns is killed and logged rather than stalling shutdown. It runs without errexit, so it checks each step's status itself. It runs in a background subshell, so a variable it sets or a directory it changes does not outlive it. Its stdin is `/dev/null` rather than the client's stream, so a handler that reads cannot consume protocol bytes. Its stdout goes to stderr, because stdout carries the JSON-RPC stream, and a handler that fails is logged rather than aborting the teardown or changing the server's exit status. The four signal handlers are still replaced.
 
 ### Fixed
 
@@ -78,7 +80,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - BATS suites covering the validator, the logging surface, and the guarantee that the file sources nothing and serves the protocol on its own.
 - ShellCheck and BATS in CI.
 
-[Unreleased]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.0.0...HEAD
+[Unreleased]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.1.0...HEAD
+[5.1.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v4.0.0...v5.0.0
 [4.0.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v2.0.0...v3.0.0
