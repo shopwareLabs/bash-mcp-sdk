@@ -31,6 +31,7 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 | `tests/fixtures/` | The fixture server (`cancellation_server.sh`) and tools list the cancellation and lifecycle suites drive over the real protocol |
 | `tests/test_helper/common_setup.bash` | `REPO_ROOT` resolution; loads bats-support and bats-assert |
 | `tests/test_helper/mcp_client.bash` | The client harness: the server's FIFO stdin, its capture files, and the per-start instance marker a suite scopes a process count with |
+| `tests/test_helper/write_server.bash` | The server-script writer suites build throwaway servers with: preamble, `MCP_*` exports, the `source` line and `run_mcp_server`, body from stdin; `tests/fixtures/cancellation_server.sh` stays a static fixture |
 | `.github/scripts/setup-bats.sh` | Installs BATS into `.bats/` for local runs and every CI test job |
 | `.github/workflows/ci.yml` | CI: a runner-native ShellCheck job over `lib`, `tests`, `scripts`, `.github/scripts`, and a Debian/Alpine container matrix running BATS through the script, images built with a GHCR cache |
 | `docker/` | The per-distro test images, one Dockerfile each; the base image and jq version are build args |
