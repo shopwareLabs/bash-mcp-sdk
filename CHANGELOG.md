@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-10-01
+
 ### Added
 
 - A server may define an optional `mcp_before_tool_call` function. Every dispatched `tools/call` runs it before the tool function, with the tool name and the validated `arguments` JSON, in the same shell as the tool, so a global variable it assigns and a directory it changes to reach the tool. Shell options it sets with `set` or `shopt` are restored before the tool runs. A hook that returns 0 has its output discarded. A hook that returns non-zero stops the call: the tool does not run, and the call returns an `isError` result carrying the hook's output. A hook that ends the call's shell with `exit` instead of returning stops the call too, whatever status it exits with: the tool does not run, and the `isError` result names the hook and carries what it printed. A hook killed by a signal stops the call with an `isError` result naming the signal. Only a shell function counts, never an executable on `PATH`. A nested `handle_tools_call` or `process_request` made from inside a tool runs the hook again. A server that already defines a function named `mcp_before_tool_call` now has it called before every tool.
@@ -100,7 +102,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - BATS suites covering the validator, the logging surface, and the guarantee that the file sources nothing and serves the protocol on its own.
 - ShellCheck and BATS in CI.
 
-[Unreleased]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.1.0...HEAD
+[Unreleased]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.2.0...HEAD
+[5.2.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.1.0...v5.2.0
 [5.1.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v4.0.0...v5.0.0
 [4.0.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v3.0.0...v4.0.0
