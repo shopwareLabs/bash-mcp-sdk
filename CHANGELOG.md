@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+
+- `tools/call` dispatches only tools the tools list declares. A `tool_<name>` function the list does not declare now answers `-32601 Tool not found: <name>`. It was previously dispatched with its arguments unchecked, because the validator skipped a tool it found no entry for. A nested `handle_tools_call` or `process_request` made from inside a tool follows the same rule.
+- A `tool_<name>_cancel` hook is no longer callable as tool `<name>_cancel` unless the tools list declares `<name>_cancel`. It previously answered as a tool whenever the hook function existed.
+- A declared entry with no `inputSchema`, or a `null` one, returns an `isError` result instead of dispatching the tool unvalidated. The message is `Cannot validate arguments for <tool>: its entry in <file> declares no inputSchema.`
+- A name the tools list declares more than once returns an `isError` result with the message `Cannot validate arguments for <tool>: the tool list at <file> declares it more than once.` It previously returned `isError` with `they could not be evaluated against its schema.`
+- The tools list is consulted before the `tool_<name>` function. A call for a name with no function now returns the list's `isError` result when the list cannot be read, declares the name twice, or gives it no `inputSchema`. It previously answered `-32601`, which hid the broken list.
+- `validate_tool_arguments` rejects a tool the tools list does not declare. It prints `Cannot validate arguments for <tool>: the tool list at <file> does not declare it.` and returns 1. It previously returned 0 with no output.
+
+### Fixed
+
+- An executable on `PATH` named `tool_<name>` is no longer dispatched as a tool, and one named `tool_<name>_cancel` is no longer run as a cancel hook. Both lookups used `type`, which also matches executables. They now match shell functions only.
+
 ## [5.1.0] - 2026-09-15
 
 ### Changed

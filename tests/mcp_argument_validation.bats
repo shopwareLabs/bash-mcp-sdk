@@ -170,10 +170,17 @@ teardown() {
     assert_output ""
 }
 
-@test "validate_tool_arguments: tool absent from the schema list is not validated" {
+@test "validate_tool_arguments: a tool the list does not declare is rejected" {
     run validate_tool_arguments "nonexistent" '{"whatever": 1}'
-    assert_success
-    assert_output ""
+    assert_failure 1
+    assert_output "Cannot validate arguments for nonexistent: the tool list at ${MCP_TOOLS_LIST_FILE} does not declare it."
+}
+
+@test "validate_tool_arguments: a declared entry with no inputSchema is rejected" {
+    printf '%s\n' '{"tools": [{"name": "bare", "description": "no schema"}]}' > "${MCP_TOOLS_LIST_FILE}"
+    run validate_tool_arguments "bare" '{}'
+    assert_failure 1
+    assert_output "Cannot validate arguments for bare: its entry in ${MCP_TOOLS_LIST_FILE} declares no inputSchema."
 }
 
 @test "validate_tool_arguments: value outside the declared enum fails naming property, value, and allowed values" {

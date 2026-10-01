@@ -364,20 +364,100 @@ handle_tools_list() {
     create_response "$id" "$result"
 }
 
+# Look up a tool's entry in the tools list and print its inputSchema, compact.
+# The list is the authority on which tools exist: handle_tools_call answers
+# from this lookup before it resolves a function, and validate_tool_arguments
+# validates through it, so a name one of them treats as declared is never a
+# name the other cannot find. The iteration is `.tools[]?`, which also walks
+# an object's values, so `{"tools": {"k": {...}}}` declares the entries it holds.
+# Args: $1 = tool name
+# Outputs: the schema on status 0, and the caller's rejection message otherwise.
+# Returns: 0 for exactly one entry carrying a non-null inputSchema; 2 when no
+#   entry names the tool; 1 when the list cannot be read or searched, names the
+#   tool more than once, or its one entry declares no inputSchema.
+_mcp_tool_schema() {
+    local tool_name="$1"
+
+    local tools_config lookup count schema rc
+    # Each failure below is handled explicitly rather than left to errexit,
+    # because whether errexit applies here depends on the caller's shape. A
+    # tools list that cannot be read is a rejection and never a skip: a
+    # validator that could not read its schemas has not validated anything, and
+    # reporting success there would wave every declared constraint through,
+    # which is how the absent-list fallback read.
+    # The jq failure below is a second such branch. read_json_file's object
+    # gate catches a file-borne document that is not an object in the branch
+    # above, but the jq branch stays reachable through a file: an object whose
+    # `tools` holds a non-object element other than `null` passes the gate, and
+    # `select` then errors on that element — the trailing `?` guards only the
+    # iteration.
+    rc=0
+    tools_config=$(read_json_file "$MCP_TOOLS_LIST_FILE" 2>/dev/null) || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        printf '%s' "Cannot validate arguments for ${tool_name}: the tool list at ${MCP_TOOLS_LIST_FILE} is missing or does not hold one JSON object."
+        return 1
+    fi
+    # One line, `<match count> <first match's inputSchema as JSON>`, so the
+    # count and the schema come out of a single read of the list. `tojson`
+    # renders an absent inputSchema and a present null alike as `null`.
+    rc=0
+    lookup=$(printf '%s\n' "$tools_config" | jq -r --arg n "$tool_name" \
+        '[.tools[]? | select(.name == $n)] | "\(length) \(.[0].inputSchema | tojson)"' 2>/dev/null) || rc=$?
+    count="${lookup%% *}"
+    schema="${lookup#* }"
+    if [[ $rc -ne 0 || ! "$count" =~ ^[0-9]+$ ]]; then
+        printf '%s' "Cannot validate arguments for ${tool_name}: the tool list at ${MCP_TOOLS_LIST_FILE} does not hold a usable tools list."
+        return 1
+    fi
+    if [[ "$count" == "0" ]]; then
+        printf '%s' "Cannot validate arguments for ${tool_name}: the tool list at ${MCP_TOOLS_LIST_FILE} does not declare it."
+        return 2
+    fi
+    # Two entries for one name would leave the schema that applies to depend on
+    # which entry a reader takes first.
+    if [[ "$count" != "1" ]]; then
+        printf '%s' "Cannot validate arguments for ${tool_name}: the tool list at ${MCP_TOOLS_LIST_FILE} declares it more than once."
+        return 1
+    fi
+    if [[ "$schema" == "null" ]]; then
+        printf '%s' "Cannot validate arguments for ${tool_name}: its entry in ${MCP_TOOLS_LIST_FILE} declares no inputSchema."
+        return 1
+    fi
+    printf '%s' "$schema"
+}
+
 # Validate call arguments against the tool's declared inputSchema, rejecting
 # arguments that are not a JSON object. The enforced keywords, the union-type
 # rule, the range-bound rule and the diagnostic precedence order are
 # README.md §API.
+# The schema comes from _mcp_tool_schema, so a tool the tools list does not
+# declare exactly once with a non-null inputSchema is rejected rather than
+# skipped, and so is a tools list that cannot be read, whether it is missing,
+# unparseable, or holds a document that is not a JSON object.
+# Args: $1 = tool name, $2 = arguments JSON
+# On violation: prints a human-readable message to stdout and returns 1.
+validate_tool_arguments() {
+    local tool_name="$1"
+    local arguments="$2"
+
+    local schema rc
+    rc=0
+    schema=$(_mcp_tool_schema "$tool_name") || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        printf '%s' "$schema"
+        return 1
+    fi
+    _mcp_validate_against_schema "$schema" "$arguments" "$tool_name"
+}
+
+# Check arguments against one inputSchema; validate_tool_arguments' contract
+# applies, minus the tools-list lookup its caller has already made.
 # A declared `integer` is satisfied by a whole-valued number, decided from the
 # number as jq renders it and not from its double value alone, so a fractional
 # literal at or above 2^52 = 4503599627370496 is rejected instead of being read
 # as whole; a rendering that carries an exponent keeps the double-based verdict,
 # which admits a fractional value below the smallest subnormal double.
-# A tool with no entry in the tools list, or whose entry declares no
-# inputSchema, is not validated. A tools list that cannot be read is a
-# rejection, whether it is missing, unparseable, or holds a document that is
-# not a JSON object, so an unreadable list never becomes a silent skip. A jq
-# failure is a rejection and never a skip:
+# A jq failure is a rejection and never a skip:
 # a validator that could not evaluate its input has not validated it, and
 # reporting success there would wave every constraint through. That branch is
 # defense-in-depth for a direct call rather than a live remote-input guard —
@@ -387,43 +467,18 @@ handle_tools_list() {
 # category: `null`, `false` and every other JSON scalar are parseable, and
 # `arguments` may be any JSON value, so a client can send them and they reach
 # this validator.
-# Args: $1 = tool name, $2 = arguments JSON
+# Args: $1 = inputSchema JSON, $2 = arguments JSON, $3 = tool name, which only
+#       the evaluation-failure message names
 # On violation: prints a human-readable message to stdout and returns 1.
-validate_tool_arguments() {
-    local tool_name="$1"
+_mcp_validate_against_schema() {
+    local schema="$1"
     local arguments="$2"
-
-    local tools_config schema rc
-    # errexit is off inside this function — handle_tools_call tests it in a
-    # conditional — so each failure below is handled explicitly rather than
-    # left to the call site's shape. A tools list that cannot be read is a
-    # rejection and never a skip: a validator that could not read its schemas
-    # has not validated anything, and reporting success there would wave every
-    # declared constraint through, which is how the absent-list fallback read.
-    # The jq failure below is a second such branch. read_json_file's object
-    # gate catches a file-borne document that is not an object in the branch
-    # above, but the jq branch stays reachable through a file: an object whose
-    # `tools` holds a non-object element passes the gate, and `select` then
-    # errors on that element — the trailing `?` guards only the iteration.
-    rc=0
-    tools_config=$(read_json_file "$MCP_TOOLS_LIST_FILE" 2>/dev/null) || rc=$?
-    if [[ $rc -ne 0 ]]; then
-        printf '%s' "Cannot validate arguments for ${tool_name}: the tool list at ${MCP_TOOLS_LIST_FILE} is missing or does not hold one JSON object."
-        return 1
-    fi
-    rc=0
-    schema=$(echo "$tools_config" | jq -c --arg n "$tool_name" \
-        '(.tools[]? | select(.name == $n) | .inputSchema) // empty' 2>/dev/null) || rc=$?
-    if [[ $rc -ne 0 ]]; then
-        printf '%s' "Cannot validate arguments for ${tool_name}: the tool list at ${MCP_TOOLS_LIST_FILE} does not hold a usable tools list."
-        return 1
-    fi
-    [[ -z "$schema" || "$schema" == "null" ]] && return 0
+    local tool_name="$3"
 
     # A non-object `arguments` is rejected in the first branch because every
     # constraint below reads `$args | keys`, which errors on any other type and
     # would take the whole schema down with it.
-    local message
+    local message rc
     rc=0
     message=$(jq -n -r \
         --argjson schema "$schema" \
@@ -672,14 +727,40 @@ handle_tools_call() {
         return
     fi
 
+    # The tools list decides which tools exist, not the shell: a sourced
+    # `tool_*` function the list does not declare, a `tool_<name>_cancel` hook
+    # included, is not a tool. The lookup also returns the schema the validation
+    # below runs against, so the list is read once per call.
+    local schema lookup_rc
+    lookup_rc=0
+    schema=$(_mcp_tool_schema "$tool_name") || lookup_rc=$?
+    if [[ $lookup_rc -eq 2 ]]; then
+        create_error_response "$id" -32601 "Tool not found: $tool_name"
+        return
+    fi
+    if [[ $lookup_rc -ne 0 ]]; then
+        log "ERROR" "Tool $tool_name argument validation failed: $schema"
+        local lookup_result
+        lookup_result=$(jq -n -c \
+            --arg text "$schema" \
+            '{"content": [{"type": "text", "text": $text}], "isError": true}')
+        create_response "$id" "$lookup_result"
+        return
+    fi
+
+    # `declare -F` matches a shell function only. `type` also matched an
+    # executable, alias or builtin of that name, so a `tool_x` on PATH answered
+    # for a tool the server never defined.
     local func_name="tool_${tool_name}"
-    if ! type "$func_name" &>/dev/null; then
+    if ! declare -F "$func_name" >/dev/null; then
         create_error_response "$id" -32601 "Tool not found: $tool_name"
         return
     fi
 
-    local validation_error
-    if ! validation_error=$(validate_tool_arguments "$tool_name" "$arguments"); then
+    local validation_error validation_rc
+    validation_rc=0
+    validation_error=$(_mcp_validate_against_schema "$schema" "$arguments" "$tool_name") || validation_rc=$?
+    if [[ $validation_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name argument validation failed: $validation_error"
         local invalid_result
         invalid_result=$(jq -n -c \
@@ -1020,8 +1101,10 @@ _run_cancel_hook() {
     local tool_name="$1"
     local arguments="$2"
 
+    # A function only, as in handle_tools_call: `type` would also run a
+    # `tool_<name>_cancel` executable found on PATH.
     local hook="tool_${tool_name}_cancel"
-    if ! type "$hook" &>/dev/null; then
+    if ! declare -F "$hook" >/dev/null; then
         return 0
     fi
 
@@ -1270,7 +1353,7 @@ process_request() {
     # Computed once here, because both the version arm below and the id-type
     # gate read this verdict; a second test would be the same question twice.
     #
-    # The integer test is `validate_tool_arguments`' `type_ok` test for a
+    # The integer test is `_mcp_validate_against_schema`'s `type_ok` test for a
     # declared `integer`, restated for a whole document: `$id` is already the
     # id's `tojson` rendering, so the value under test is the document jq reads
     # rather than a sub-value. The duplication is deliberate — the validator's
