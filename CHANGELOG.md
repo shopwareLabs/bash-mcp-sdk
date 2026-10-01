@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- A server may define an optional `mcp_before_tool_call` function. Every dispatched `tools/call` runs it before the tool function, with the tool name and the validated `arguments` JSON, in the same shell as the tool, so a global variable it assigns and a directory it changes to reach the tool. Shell options it sets with `set` or `shopt` are restored before the tool runs. A hook that returns 0 has its output discarded. A hook that returns non-zero stops the call: the tool does not run, and the call returns an `isError` result carrying the hook's output. A hook that ends the call's shell with `exit` instead of returning stops the call too, whatever status it exits with: the tool does not run, and the `isError` result names the hook and carries what it printed. A hook killed by a signal stops the call with an `isError` result naming the signal. Only a shell function counts, never an executable on `PATH`. A nested `handle_tools_call` or `process_request` made from inside a tool runs the hook again. A server that already defines a function named `mcp_before_tool_call` now has it called before every tool.
+- Each dispatched call gets a directory of its own, exported as `MCP_CALL_TMPDIR` to the before-tool hook, the tool and its child processes, and to the call's `tool_<name>_cancel` hook. The server removes it with its contents when the call returns, fails, is cancelled, or is in flight at a shutdown, including after the `SIGKILL` a tool that ignores `SIGTERM` gets. A server killed with `SIGKILL` leaves it behind under `TMPDIR` inside the call's `mcp-call.*` directory. A call whose directory cannot be created returns an `isError` result and does not run.
+- `README.md` §Writing a server states that a tool's own `trap … EXIT` is supported. It runs when the tool returns and when the `SIGTERM` step of a cancellation or shutdown ends the tool, and not after a `SIGKILL`.
+
 ### Changed
 
 - `tools/call` dispatches only tools the tools list declares. A `tool_<name>` function the list does not declare now answers `-32601 Tool not found: <name>`. It was previously dispatched with its arguments unchecked, because the validator skipped a tool it found no entry for. A nested `handle_tools_call` or `process_request` made from inside a tool follows the same rule.
@@ -16,6 +22,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - An executable on `PATH` named `tool_<name>` is no longer dispatched as a tool, and one named `tool_<name>_cancel` is no longer run as a cancel hook. Both lookups used `type`, which also matches executables. They now match shell functions only.
+- A `tools/call` whose temporary files could not be created, for example because `TMPDIR` became unwritable after startup, ended a server running under `set -o posix` without a response. The status of the `mktemp` call was not checked. The call now returns an `isError` result and the server keeps running.
 
 ## [5.1.0] - 2026-09-15
 

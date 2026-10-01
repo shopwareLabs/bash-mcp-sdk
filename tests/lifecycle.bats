@@ -143,16 +143,16 @@ _mcp_wait_for_proc_count_at_least() {
     return 1
 }
 
-# Wait up to <secs> (default 5) for exactly <want> tool output files under
-# TMPDIR. One exists while a call is in flight; the SDK names them
-# mcp-tool-output.*, and the path is held only by the dispatch subshell that
+# Wait up to <secs> (default 5) for exactly <want> call roots under TMPDIR. One
+# exists while a call is in flight and holds the call's output file; the SDK
+# names them mcp-call.*, and the path is held only by the dispatch subshell that
 # created it, so the directory is the only place a test can see whether a
 # teardown removed it.
 _mcp_tool_output_files() {
     local file
     local count=0
     for file in "${TMPDIR}"/*; do
-        if [[ -e "${file}" && "${file}" == */mcp-tool-output.* ]]; then
+        if [[ -e "${file}" && "${file}" == */mcp-call.* ]]; then
             count=$(( count + 1 ))
         fi
     done
@@ -171,7 +171,7 @@ _mcp_wait_for_tool_output_count() {
         fi
         sleep 0.1
     done
-    printf 'expected %s tool output file(s), saw %s\n' "${want}" "${count}" >&2
+    printf 'expected %s call root(s), saw %s\n' "${want}" "${count}" >&2
     return 1
 }
 
@@ -526,10 +526,12 @@ teardown() {
     # shellcheck source=../lib/mcpserver_core.sh
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
 
-    local output_file sentinel_file record_file
-    output_file="${BATS_TEST_TMPDIR}/mcp-tool-output.tombstone"
+    local call_root output_file sentinel_file record_file
+    call_root="${BATS_TEST_TMPDIR}/mcp-call.tombstone"
+    mkdir "${call_root}"
+    output_file="${call_root}/output"
     printf 'tool output\n' > "${output_file}"
-    sentinel_file="$(_sentinel_pid_file "${output_file}")"
+    sentinel_file="${call_root}/sentinel"
     printf '%s\n' '4242' > "${sentinel_file}"
     record_file="${BATS_TEST_TMPDIR}/inflight"
     printf '%s %s %s\n' '-' 'slow' "${output_file}" > "${record_file}"
@@ -555,12 +557,87 @@ teardown() {
     run _server_teardown
 
     assert_success
-    assert [ ! -e "${output_file}" ]
-    assert [ ! -e "${sentinel_file}" ]
+    assert [ ! -e "${call_root}" ]
     assert [ ! -e "${record_file}" ]
     assert [ ! -e "${hook_file}" ]
     assert kill -0 -- "-${decoy_pid}"
 
     kill -KILL -- "-${decoy_pid}" 2>/dev/null || true
+    wait "${decoy_pid}" 2>/dev/null || true
+}
+
+@test "an in-flight record naming a path outside a call root is refused, and nothing is removed" {
+    # The record is the only handle a teardown has on the call root, and the
+    # root is derived from the output path it names. A record naming a path
+    # outside an mcp-call.* directory — a stale record, or one written by
+    # something other than this SDK — must not aim the removal at that path's
+    # parent.
+    # shellcheck source=../lib/mcpserver_core.sh
+    source "${REPO_ROOT}/lib/mcpserver_core.sh"
+
+    local victim_dir keep_file record_file
+    victim_dir="${BATS_TEST_TMPDIR}/victim"
+    mkdir "${victim_dir}"
+    keep_file="${victim_dir}/keep"
+    printf 'keep me\n' > "${keep_file}"
+    record_file="${BATS_TEST_TMPDIR}/inflight"
+    printf '%s %s %s\n' '-' 'slow' "${victim_dir}/output" > "${record_file}"
+    export _MCP_INFLIGHT_FILE="${record_file}"
+
+    run _server_teardown
+
+    assert_success
+    assert [ -d "${victim_dir}" ]
+    assert [ -e "${keep_file}" ]
+    run grep -qF "refusing to remove ${victim_dir}: not a call root" "${MCP_LOG_FILE}"
+    assert_success
+}
+
+@test "a live in-flight record naming a path outside a call root gives its cancel hook no MCP_CALL_TMPDIR" {
+    # The tombstone case above reaches no cancel hook. A numeric pgid reaches
+    # one, and the hook is handed the call's MCP_CALL_TMPDIR during a teardown
+    # that may run while the call's directory is still populated. A record
+    # naming a path outside an mcp-call.* directory must therefore not hand the
+    # hook that path's parent as the directory to read.
+    # shellcheck source=../lib/mcpserver_core.sh
+    source "${REPO_ROOT}/lib/mcpserver_core.sh"
+
+    local victim_dir keep_file record_file hook_file
+    victim_dir="${BATS_TEST_TMPDIR}/victim"
+    mkdir "${victim_dir}"
+    keep_file="${victim_dir}/keep"
+    printf 'keep me\n' > "${keep_file}"
+    record_file="${BATS_TEST_TMPDIR}/inflight"
+
+    # A real, live process group, in a group of its own: a numeric pgid that
+    # passes the teardown's liveness check is what takes the branch that runs
+    # the hook. The teardown TERMs it, so it must be a process that dies on the
+    # first TERM.
+    set -m
+    sleep 30 &
+    local decoy_pid
+    decoy_pid=$!
+    set +m
+    printf '%s %s %s\n' "${decoy_pid}" 'slow' "${victim_dir}/output" > "${record_file}"
+    export _MCP_INFLIGHT_FILE="${record_file}"
+
+    hook_file="${BATS_TEST_TMPDIR}/cancel-hook.log"
+    tool_slow_cancel() {
+        printf '%s\n' "${MCP_CALL_TMPDIR-unset}" > "${hook_file}"
+    }
+
+    run _server_teardown
+
+    assert_success
+    # The hook ran — the record's group was live — and it saw no directory:
+    # `${var-word}` yields the word only when the variable is unset, so a hook
+    # handed the victim directory, or an empty string, records something else.
+    assert_equal "$(<"${hook_file}")" "unset"
+    assert [ -d "${victim_dir}" ]
+    assert [ -e "${keep_file}" ]
+    run grep -qF "refusing to derive a call root from ${victim_dir}/output: not a call root" "${MCP_LOG_FILE}"
+    assert_success
+    run _mcp_wait_for_exit "${decoy_pid}" 3
+    assert_success
     wait "${decoy_pid}" 2>/dev/null || true
 }

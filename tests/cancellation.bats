@@ -34,6 +34,11 @@
 # process_request are public — must not inherit the outer dispatch's server-loop
 # state, so that it neither reads the client's stream nor stops the server.
 # The file itself must survive being sourced twice in one shell.
+# The cases that dispatch a tool in-process — a direct handle_tools_call, and a
+# `set -e` shell that sources the file and calls it — capture with
+# `run --separate-stderr`: bash can report a failed job-control setpgid for the
+# wrapper on stderr, and that line is not part of the response the assertions
+# read.
 # The server is tests/fixtures/cancellation_server.sh; the client harness is
 # tests/test_helper/mcp_client.bash (see its header for the exported paths and
 # the fd that holds the server's stdin open).
@@ -1402,7 +1407,7 @@ teardown() {
         printf 'trivial done\n'
     }
 
-    run handle_tools_call 1 '{"name":"trivial","arguments":{}}' </dev/null
+    run --separate-stderr handle_tools_call 1 '{"name":"trivial","arguments":{}}' </dev/null
 
     assert_success
     assert_output '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"trivial done"}],"isError":false}}'
@@ -1449,7 +1454,12 @@ teardown() {
 }
 
 @test "a direct set -e dispatch keeps running after a tool's failed step" {
-    run bash -c '
+    # The body is single-quoted so the inner shell expands $1 and the JSON, not
+    # this one; shellcheck stops reading the `bash -c` script once the
+    # `--separate-stderr` flag precedes it, and reports those quotes as a
+    # mistake they are not.
+    # shellcheck disable=SC2016
+    run --separate-stderr bash -c '
         set -e
         source "$1"
         tool_fail_then_continue() {
