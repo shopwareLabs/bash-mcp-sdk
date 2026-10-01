@@ -51,18 +51,53 @@ The tool then runs in the background under `set -m`, which gives the job its own
 
 The wrapper redirects to the call's output file, merges stderr into it, and takes its stdin from `/dev/null`. An inherited stdin would be the client's JSON-RPC stream, and a tool reading it would consume protocol bytes. The wrapper inherits no lifeline descriptor either, because `process_request` closed the dispatch subshell's copy on the way in. Both the wrapper and the sentinel open the lifeline FIFO by path, read-only.
 
+Before the spawn, `handle_tools_call` creates the call root with `mktemp -d` under `TMPDIR`, named `mcp-call.*`. `mktemp -d` creates it exclusively and with mode 700, so no other user can place anything at a name inside it, and every file of the call is written there with a plain `>`. A relative `TMPDIR` produces a relative root, which is made absolute so that a hook that changes directory still reaches it.
+
+| Path in the root | Holds | Written by |
+|---|---|---|
+| `output` | The wrapper's stdout and stderr | The wrapper's redirection |
+| `sentinel` | The lifeline sentinel's pid, on the server loop only | The wrapper |
+| `tmp` | `MCP_CALL_TMPDIR`, created with `mkdir -m 700` | `handle_tools_call` |
+| `hook-output` | `mcp_before_tool_call`'s stdout and stderr; left in the root, which the answer for a hook that called `exit` reads it out of, and removed with the root | `_mcp_run_tool` |
+| `hook-running` | Nothing; present from before the hook runs until the root is removed | `_mcp_run_tool` |
+| `hook-returned` | Nothing; present once the hook has returned, whatever its status | `_mcp_run_tool` |
+| `hook-refused` | Nothing; present once the hook has returned non-zero | `_mcp_run_tool` |
+
+A root that cannot be created, or a `tmp` that cannot, fails the call: the error is logged, whatever was created is removed, an `isError` result answers, and nothing is spawned. Each status is checked, so a failed `mktemp -d` never leaves a path relative to the working directory.
+
+Inside the wrapper, `_reset_tool_dispatch_state` runs first. The wrapper then exports `MCP_CALL_TMPDIR` and calls `_mcp_run_tool`. When `declare -F` finds `mcp_before_tool_call`, that function saves the shell options from `set +o` and `shopt -p`, creates `hook-running`, and runs the hook in a brace group redirected to `hook-output`. A brace group does not fork, so the hook's assignments, functions, working directory and `EXIT` trap stay in the wrapper's shell for the tool. Once the hook returns, the saved options are restored and `hook-returned` is written, whatever the status. None of the steps that follow the hook reaches for an external command — the restore runs `builtin set` and `builtin shopt`, and every marker is a bare redirection — so a hook that rewrites `PATH` cannot strand a marker. The tool therefore runs with errexit off even after a hook that turned it on.
+
+A non-zero hook status creates `hook-refused`, prints the capture to stdout, which is the call's output file, and becomes the wrapper's exit status. A zero status leaves the capture unread and runs the tool; the capture file stays in the root either way, and goes when the root does. No hook means no marker at all.
+
+`handle_tools_call` reads the markers when it collects a call that was not cancelled.
+
+| Root holds | Wrapper status | Answer | Log |
+|---|---|---|---|
+| `hook-running` without `hook-returned` | 128 or below | `isError` naming the hook as having ended the call, followed by the captured output when there is any | `ERROR` naming the hook and the status |
+| `hook-running` without `hook-returned` | above 128 | `isError` naming the signal that killed the hook | `ERROR` naming the hook and the status |
+| `hook-refused` | non-zero | `isError` with the hook's output, as for a failing tool | `before-tool hook refused tool <name> (status N)` |
+| otherwise | non-zero | `isError` with the tool's output | `Tool <name> failed with exit code N` |
+| otherwise | 0 | the tool's output | none |
+
+A `hook-running` with no `hook-returned` means the hook never returned: it called `exit`, or a signal killed the wrapper. Whatever status the hook exited with is discarded.
+
 The process group is the containment boundary.
 
 | Member | Enters the group | Leaves it |
 |---|---|---|
-| The wrapper subshell | `set -m` makes it the leader, and its pid is the group id | Exits when the tool function returns |
+| The wrapper subshell | `set -m` makes it the leader, and its pid is the group id | Exits when the tool function returns, or when the hook returns non-zero or calls `exit` |
+| The before-tool hook | Runs inside the wrapper, before the tool | Returns before the tool runs; a non-zero return or an `exit` ends the wrapper |
 | The tool function | Runs inside the wrapper | Exits with the wrapper |
 | The lifeline sentinel | The wrapper starts it before the tool | Waits on the lifeline, so it outlives the tool; the group SIGKILL reaps it |
 | Anything the tool started and did not wait for | Inherits the group | The group SIGKILL reaps it |
 
 `_kill_tool_group` runs after the wrapper is reaped and clears whatever is left. It signals only a group that still holds a live member, because an emptied group id can already belong to something else.
 
-`_reset_tool_dispatch_state` runs inside the wrapper, immediately before the tool. It clears `_MCP_IN_SERVER_LOOP` and unsets the three file variables. A tool is free to call `process_request` or `handle_tools_call` for a nested dispatch of its own.
+Once a call is dispatched, its root is removed at three sites, each after the group has exited or been killed. `handle_tools_call` removes it once the wait has returned, for a call that was not cancelled. `_teardown_tool_call` removes it after its `_kill_tool_group`, which covers the cancelled call. `_server_teardown` removes the directory of the in-flight record's output path (§Shutdown). A call whose root or `tmp` cannot be created is never dispatched, and that path removes only the root it created. A server killed with `SIGKILL` reaches none of these sites.
+
+Every site removes the root through `_mcp_remove_call_root`, which returns at once for a path that is already gone. Before it touches anything it refuses a path that is not absolute or whose basename is not `mcp-call.*`, logging the refusal at `WARN`, and `_server_teardown` requires the output path it derives the root from to end in `output`. It runs `rm -rf` first. When the root survives, `find` without `-L` restores read, write and search permission on each directory that lacks one, with a per-directory `-exec … \;` so each directory is fixed before `find` reads it, and `rm -rf` runs again. `-type d` matches no symlink, so the target of a symlink in the root keeps its mode. A root that still survives is logged at `WARN` with the captured errors, and the function returns 0. A removal failure does not change the call's outcome: a call that gets a response still gets it, and a cancelled call still gets none. Under `set -o posix` a failing command in the dispatch would otherwise end the server.
+
+`_reset_tool_dispatch_state` runs inside the wrapper, ahead of the hook and the tool. It clears `_MCP_IN_SERVER_LOOP` and unsets the three file variables. A tool is free to call `process_request` or `handle_tools_call` for a nested dispatch of its own.
 
 Without that reset, the nested dispatch would poll the tool's `/dev/null` stdin. It would read the instant EOF as a client closing the stream and set the shutdown flag. That stops the server as soon as the outer call returns. Only the wrapper subshell's copies change, so the outer call keeps its own state and its own in-flight record.
 
@@ -96,9 +131,9 @@ The record is written after the spawn, and it is best effort. A teardown that la
 
 A pgid that an emptied group once held can be handed to another process group. A teardown reading a numeric id there would TERM and KILL a group that has nothing to do with this call. The tombstone takes that id out of the record while keeping the tool name and the output path, which a truncation would lose.
 
-`_server_teardown` reads the pgid field first. A `-` means signal nothing, run no cancel hook, poll no grace, and release only the two named files. A numeric field means a call is still running.
+`_server_teardown` reads the pgid field first. A `-` means signal nothing, run no cancel hook, poll no grace, and release only the call root the output path names. A numeric field means a call is still running.
 
-The sentinel pid file is not in the record. `_sentinel_pid_file` derives it from the output file's path, since that path is the only handle a shutdown teardown has on the call.
+The call root is not in the record. Every reader takes it as the directory of the output path, `${output_file%/*}`, and finds the sentinel pid file and `MCP_CALL_TMPDIR` in it as `sentinel` and `tmp`. That path is the only handle a shutdown teardown has on the call.
 
 ## Cancellation
 
@@ -116,7 +151,7 @@ The sentinel is left out of that count. It waits on the lifeline rather than on 
 
 A `ps` that fails is unknown liveness, not an empty group. The unknown case degrades to `kill -0` on the whole group, which counts the sentinel and costs the full grace. Read as empty it would end the grace loop immediately and skip the SIGKILL, leaving a TERM-immune tool alive. The degraded path delays a kill rather than dropping one.
 
-`_run_cancel_hook` returns at once when no shell function `tool_<name>_cancel` is defined. It tests with `declare -F`, so an executable of that name on `PATH` is never run as a hook. Otherwise it runs the hook in a background group of its own, with stdin `/dev/null` and its output discarded. A hook still alive after the grace is SIGKILLed by group, and the kill is logged. A hook that exits non-zero is logged too, and neither outcome fails the call.
+`_run_cancel_hook` returns at once when no shell function `tool_<name>_cancel` is defined. It tests with `declare -F`, so an executable of that name on `PATH` is never run as a hook. Otherwise it runs the hook in a background group of its own, with stdin `/dev/null` and its output discarded. Its third argument is the call's output file, whose directory is the call root, and it exports that root's `tmp` to the hook as `MCP_CALL_TMPDIR`. With no output path it unsets the variable instead, so a hook never sees an empty value. Both callers run it before the group is signalled and before the call root is removed. A hook still alive after the grace is SIGKILLed by group, and the kill is logged. A hook that exits non-zero is logged too, and neither outcome fails the call.
 
 No tombstone is written for the hook's group. The record names the call's group, which is still live at that point and has to stay named.
 
@@ -130,7 +165,7 @@ That handler is captured in `run_mcp_server`, immediately before the traps are i
 
 `_server_teardown` is idempotent, because every step is a no-op once its subject is gone. A `_MCP_TEARDOWN_RUNNING` flag keeps a second entry out while a pass is running. The flag is cleared on the way out, so a shell that runs a second server still tears that one down.
 
-A pass stops the in-flight call, then releases files, then drops the lifeline. It removes the call's output file and sentinel pid file, the in-flight record, the shutdown flag, and the partial-line file. It closes the lifeline descriptor and removes the lifeline directory; dropping the last writer is what releases a sentinel still waiting. Each variable is cleared with the file it names, so a second pass cannot remove a path the shell has since given to something else.
+A pass stops the in-flight call, then releases files, then drops the lifeline. It removes the in-flight call's root, the in-flight record, the shutdown flag, and the partial-line file. It closes the lifeline descriptor and removes the lifeline directory; dropping the last writer is what releases a sentinel still waiting. Each variable is cleared with the file it names, so a second pass cannot remove a path the shell has since given to something else.
 
 A signal that arrives mid-pass is recorded rather than re-raised. `_mcp_teardown_on_signal` stores it in `_MCP_PENDING_SIGNAL` and returns. Re-raising there would end the shell before the pass reached its SIGKILL and its file removals. The finishing pass restores the signal's default disposition and re-raises it against `BASHPID`, so the shell still dies by the signal.
 
@@ -140,7 +175,7 @@ Bash runs a trap only between foreground commands, and that sets the two signal 
 
 A signal to the whole process group kills the dispatch subshell at once. The command substitution returns, and the trap reaps a tool group that is still alive.
 
-A server killed with `SIGKILL` runs no teardown, so its temporary files stay under `TMPDIR`. Those are the in-flight record (`mcp-inflight.*`), the lifeline directory (`mcp-lifeline.*`), a running call's output file (`mcp-tool-output.*`) and sentinel pid file (`mcp-sentinel.*`), and the partial-line file (`mcp-partial.*`). The lifeline sentinel still kills the tool group; only the files are left behind.
+A server killed with `SIGKILL` runs no teardown, so its temporary files stay under `TMPDIR`. Those are the in-flight record (`mcp-inflight.*`), the lifeline directory (`mcp-lifeline.*`), a running call's root (`mcp-call.*`), the partial-line file (`mcp-partial.*`), and the shutdown flag (`mcp-shutdown.*`). The lifeline sentinel still kills the tool group; only the files are left behind.
 
 ## Partial-line handoff
 
@@ -169,6 +204,9 @@ The branch also sets `_MCP_EOF_DRAIN`. `handle_tools_call` then touches the shut
 | A tool function never reads the client's protocol stream | `handle_tools_call` | §Tool containment |
 | A tool leaves nothing running once its call ends | `_kill_tool_group` | §Tool containment |
 | A nested dispatch inside a tool cannot stop the server or overwrite the outer call's record | `_reset_tool_dispatch_state` | §Tool containment |
+| A tool never runs without a call directory of its own | `handle_tools_call` | §Tool containment |
+| A tool runs only after `mcp_before_tool_call`, when defined, returns 0 | `_mcp_run_tool` | §Tool containment |
+| A call root is removed only after its call's group has exited or been killed | `handle_tools_call`, `_teardown_tool_call`, `_server_teardown` | §Tool containment |
 | A tool group dies even when the server could run no trap | `_lifeline_sentinel` | §The lifeline |
 | A process group is signalled only while it still holds a live member | `_kill_tool_group`, `_tool_group_has_live_member` | §The in-flight record |
 | A cancelled call gets no response for its id | `_await_tool_call` | §Cancellation |

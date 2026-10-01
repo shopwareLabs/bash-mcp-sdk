@@ -62,6 +62,20 @@ Configured by environment variable before sourcing:
 | `MCP_EXTRA_LOG_FILE`  | unset         | Second log target; `PROJECT_ROOT` resolves a relative path. |
 | `MCP_LOG_STDERR`      | `0`           | Set to `1` to also mirror each log line to stderr.       |
 
+Defined by the server script and resolved as shell functions only:
+
+| Function | Called |
+|---|---|
+| `tool_<name>` | For a `tools/call` naming `<name>`, when `tools.json` declares it. Receives the `arguments` JSON. |
+| `tool_<name>_cancel` | Optional. When a call of `<name>` is cancelled, or the server shuts down with it in flight. |
+| `mcp_before_tool_call` | Optional. Before every dispatched tool, with the tool name and the `arguments` JSON. |
+
+Set by the SDK for a call, not by the consumer:
+
+| Variable | Seen by | Meaning |
+|---|---|---|
+| `MCP_CALL_TMPDIR` | `mcp_before_tool_call`, the tool function and what it starts, `tool_<name>_cancel` | A directory private to the call, removed when the call ends. See *Per-call files* below. |
+
 A missing or unparseable `MCP_CONFIG_FILE` or `MCP_TOOLS_LIST_FILE` is not read as an empty configuration; both files are effectively required. `initialize` and `tools/list` answer `-32603`, naming the file they could not read. That covers a file whose single document is not a JSON object. A `tools/call` whose tools list cannot be read is rejected with an `isError` result instead of being dispatched unvalidated.
 
 Methods handled: `initialize`, `tools/list`, `tools/call` and `ping`; the notifications `notifications/initialized` and `notifications/cancelled`. A request for any other method returns `-32601`; a notification for one is logged and ignored.
@@ -117,10 +131,11 @@ A tool that exits non-zero returns its combined output as an `isError` result ra
 > [!IMPORTANT]
 > Stdout is the protocol channel. A tool function's stdout becomes the tool result, so everything else a server wants to say goes through `log`. A stray `echo` outside a tool corrupts the stream.
 
-Two properties of tool dispatch to write against:
+Three properties of tool dispatch to write against:
 
 - A tool function always runs with errexit disabled, on every dispatch path. That holds under `run_mcp_server` and from a direct call to `process_request` or `handle_tools_call` alike. A failing step does not end the tool. Check each step's status yourself and return non-zero to produce the `isError` result.
 - A tool function's stdin is `/dev/null`. A read returns EOF instead of blocking on the server's protocol stream or consuming bytes meant for it.
+- A tool function may install a `trap … EXIT`. It runs when the tool returns, before the result is built, so anything it prints joins the tool result. It also runs when the `SIGTERM` step of a cancellation or a server shutdown ends the tool. It does not run when the call's process group is killed with `SIGKILL`, which is what a tool that ignores `SIGTERM` gets after the grace. A file that must not outlive the call belongs in `MCP_CALL_TMPDIR` (*Per-call files* below).
 
 A tool cannot leave a value in a variable for a later call to read. Each call runs in its own subshell, so what a tool sets dies with that call (the boundary is in `docs/architecture.md` §Request lifecycle and §Tool containment). State that crosses calls travels through a file.
 
@@ -137,6 +152,34 @@ Inside a tool, `$$` is the server's pid while `BASHPID` is the per-call subshell
 
 Removing the file is the server script's job. *Cancelling and shutting down* below gives the traps `run_mcp_server` installs, the subshell the server script uses to keep its own, and what a `SIGKILL` leaves behind.
 
+### Running a step before every tool
+
+Tools that share a per-call step, such as an authorization check, an audit line or a change of working directory, can define it once as `mcp_before_tool_call`. When a shell function of that name exists, every dispatched `tools/call` runs it before the tool function. An executable or alias of that name is never run.
+
+It receives the tool name as `$1` and the call's `arguments` JSON as `$2`, exactly as the tool function receives it. It runs only for a call that passed the tools-list check and argument validation, so an undeclared tool or rejected arguments never reach it.
+
+The hook and the tool function run in one shell, the call's own subshell. A global variable the hook assigns, an exported variable, a function it defines and a directory it changes to are what the tool sees. The two also share one `EXIT` trap, so a `trap … EXIT` in the tool replaces one the hook installed. A function the hook defines reaches the tool function but not the SDK's own steps after the hook. Those steps use only `builtin`-prefixed shell builtins and plain redirections, so a function the hook defines and a `PATH` it changes do not affect them. A hook must not define a function named `builtin`: the SDK's steps call `builtin` by that name and would run the hook's function instead.
+
+Shell options are the exception. Whatever the hook sets with `set` or `shopt` is put back once it returns, so the tool runs with the options it would have had without the hook. A hook may turn on `set -euo pipefail` for its own body, and the tool still runs with errexit off.
+
+A hook that returns 0 lets the tool run, and its stdout and stderr are discarded. A hook that returns non-zero stops the call. The tool does not run, and the call returns an `isError` result whose text is the hook's combined output, prefixed `Error executing <name>: ` as for a failing tool. The log records it as `before-tool hook refused tool <name> (status N)`, not as a tool failure.
+
+Write the hook with `return`, not `exit`. An `exit` ends the call's shell instead of returning to it, so the tool does not run whatever status the hook exits with. The call returns an `isError` result that names the hook, followed — when the hook printed anything — by what it printed. `exit 0` gets that result too, rather than an empty success. A hook killed by a signal also stops the call, and the result names the signal. Both cases are logged at `ERROR`.
+
+The hook runs under the same dispatch properties as a tool function: errexit off, stdin `/dev/null`, and inside the call's process group, so a cancellation stops a hook that blocks. A nested `handle_tools_call` or `process_request` made from inside a tool runs the hook again for the inner call.
+
+### Per-call files
+
+Each dispatched call gets a directory of its own, exported as `MCP_CALL_TMPDIR` to the before-tool hook, the tool function and every process the tool starts. It is created empty with mode `700`, and no other call shares it. Its path is absolute even when `TMPDIR` is relative.
+
+It sits in the call's root, a directory `mcp-call.*` under `TMPDIR` (default `/tmp`) with mode `700`. The root also holds the files the server keeps for the call: its collected output and the server's own bookkeeping. They are not part of the contract, and a tool should write only inside `MCP_CALL_TMPDIR`.
+
+The server removes the root, and `MCP_CALL_TMPDIR` with it, once the call's process group has exited or been killed. That happens when the tool returns, when it fails, when the call is cancelled, and when the server shuts down with the call in flight. It covers the `SIGKILL` a tool gets after ignoring `SIGTERM`, which no `EXIT` trap survives, so a file the call keeps there needs no cleanup of its own. A subdirectory the call left read-only, or with no permissions at all, is removed too. A server killed with `SIGKILL` is the exception (*Cancelling and shutting down* below). A removal that fails is logged at `WARN`. It neither ends the server nor changes the call's outcome: a call that gets a response still gets it, and a cancelled call still gets none.
+
+A call whose root or `MCP_CALL_TMPDIR` cannot be created does not run. It returns an `isError` result instead, and the failure is logged at `ERROR`.
+
+A nested dispatch inside a tool gets a directory of its own. Its `MCP_CALL_TMPDIR` applies only inside that inner call.
+
 ### Cancelling and shutting down
 
 A client cancels an in-flight call by sending `notifications/cancelled` with the request's id in `params.requestId`. The server stops the tool's process group with `SIGTERM`, then `SIGKILL` for whatever is left of it, and sends no response for that id. A cancellation that names nothing in flight is logged and dropped. A tool that dies on the `SIGTERM` is reaped at once rather than after the two-second grace (measured as in `docs/architecture.md` §Cancellation).
@@ -146,6 +189,8 @@ The tool's process group is the containment boundary. Anything the tool leaves r
 A tool that must outlive the call has to leave the group itself by detaching into a new session. Bash offers no builtin for that and macOS ships no `setsid(1)`, so such a tool needs its own double-fork.
 
 A tool may define an optional `tool_<name>_cancel` hook. It runs with the call's original `arguments` JSON as its one argument. A signal that tears the server down passes an empty string instead: the in-flight record holds the tool's group and name, but no arguments.
+
+The hook gets the call's `MCP_CALL_TMPDIR` on both routes, so it can read what the call recorded there, such as the path of a file the call created or the id of a job it started. The directory still exists while the hook runs.
 
 The hook runs before the group is signalled, and each of the two steps gets its own two seconds. A hook that runs longer than two seconds is killed, and its exit status is logged rather than failing the call. A wedged hook followed by a group that ignores `SIGTERM` therefore holds a cancellation for about four seconds before the final `SIGKILL`.
 
@@ -163,7 +208,7 @@ Kill the process group to stop a call and still see its result. To stop the serv
 
 Bash cannot install a handler for a signal that was ignored when the shell started. A non-interactive shell's plain `&` hands the background job `SIGINT` and `SIGQUIT` already ignored. A server backgrounded that way with job control off therefore has no `INT` trap at all. The `TERM` and `HUP` traps install normally.
 
-A server killed with `SIGKILL` runs no trap, so a call it had in flight is stopped by the lifeline instead (the lifeline and its sentinel are in `docs/architecture.md` §The lifeline). That kill runs no cleanup, so small files under `TMPDIR` (default `/tmp`) can be left behind, and nothing removes them. The patterns are `mcp-inflight.*`, `mcp-lifeline.*`, `mcp-tool-output.*`, `mcp-sentinel.*` and `mcp-partial.*`. A server that goes down on a signal it can trap removes the in-flight call's output file as part of its teardown.
+A server killed with `SIGKILL` runs no trap, so a call it had in flight is stopped by the lifeline instead (the lifeline and its sentinel are in `docs/architecture.md` §The lifeline). That kill runs no cleanup, so small files under `TMPDIR` (default `/tmp`) can be left behind, and nothing removes them. The patterns are `mcp-inflight.*`, `mcp-lifeline.*`, `mcp-call.*`, `mcp-partial.*` and `mcp-shutdown.*`, where `mcp-call.*` is a call's root with its `MCP_CALL_TMPDIR` and whatever the call left in it. A server that goes down on a signal it can trap removes the in-flight call's root as part of its teardown.
 
 A client that closes stdin mid-call still gets that call's response. The server finishes the call, answers it, and then exits. Requests that arrived during the call are answered after it, in order.
 

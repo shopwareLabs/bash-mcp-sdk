@@ -774,12 +774,42 @@ handle_tools_call() {
     # cancelled by process group. Job-control notices exist only for interactive
     # shells, so the `set -m` here adds nothing to stderr.
     # docs/architecture.md §Tool containment.
-    local output_file
-    output_file=$(mktemp "${TMPDIR:-/tmp}/mcp-tool-output.XXXXXX")
-    # Where the wrapper below records the sentinel's pid; _sentinel_pid_file
-    # carries the derivation and its reason.
-    local sentinel_file
-    sentinel_file="$(_sentinel_pid_file "$output_file")"
+    # Every file of the call lives in one root that `mktemp -d` creates mode 700
+    # and exclusively, so no other user can place anything at a name inside it
+    # and the files below are written with a plain `>`.
+    # docs/architecture.md §Tool containment.
+    local call_root root_rc=0
+    call_root=$(mktemp -d "${TMPDIR:-/tmp}/mcp-call.XXXXXX" 2>&1) || root_rc=$?
+    if [[ $root_rc -ne 0 ]]; then
+        log "ERROR" "Tool $tool_name not run: cannot create its call directory in ${TMPDIR:-/tmp}: ${call_root}"
+        local setup_result
+        setup_result=$(jq -n -c \
+            --arg text "Cannot run ${tool_name}: its call directory could not be created." \
+            '{"content": [{"type": "text", "text": $text}], "isError": true}')
+        create_response "$id" "$setup_result"
+        return
+    fi
+    # A relative TMPDIR yields a relative root, and a hook that changes
+    # directory would then miss its own capture file and hand the tool a
+    # MCP_CALL_TMPDIR that names nothing from where it runs.
+    [[ $call_root == /* ]] || call_root="$PWD/$call_root"
+    # The in-flight record holds the output file's path alone, so every reader
+    # derives the root as its directory; the names below are that contract.
+    local output_file="$call_root/output"
+    local sentinel_file="$call_root/sentinel"
+    local call_tmpdir="$call_root/tmp"
+    local mkdir_error mkdir_rc=0
+    mkdir_error=$(mkdir -m 700 -- "$call_tmpdir" 2>&1) || mkdir_rc=$?
+    if [[ $mkdir_rc -ne 0 ]]; then
+        log "ERROR" "Tool $tool_name not run: cannot create MCP_CALL_TMPDIR ${call_tmpdir}: ${mkdir_error}"
+        _mcp_remove_call_root "$call_root"
+        local setup_result
+        setup_result=$(jq -n -c \
+            --arg text "Cannot run ${tool_name}: its call directory could not be created." \
+            '{"content": [{"type": "text", "text": $text}], "isError": true}')
+        create_response "$id" "$setup_result"
+        return
+    fi
     local pid
     local monitor_was_enabled=0
     if [[ -o monitor ]]; then
@@ -797,13 +827,15 @@ handle_tools_call() {
         # wrapper that cannot write it leaves the group's raw liveness as the
         # teardown's only measure, which is slower but not wrong.
         # docs/architecture.md §Tool containment.
-        ( exec {lifeline_rd}<"${_MCP_LIFELINE_DIR}/lifeline"; _lifeline_sentinel "${lifeline_rd}" & sentinel_pid=$!; set +e; printf '%s\n' "$sentinel_pid" > "${sentinel_file}"; _reset_tool_dispatch_state; "$func_name" "$arguments" ) \
+        # shellcheck disable=SC2030 # MCP_CALL_TMPDIR is exported for this call's wrapper alone; the dispatch shell must not keep it.
+        ( exec {lifeline_rd}<"${_MCP_LIFELINE_DIR}/lifeline"; _lifeline_sentinel "${lifeline_rd}" & sentinel_pid=$!; set +e; printf '%s\n' "$sentinel_pid" > "${sentinel_file}"; _reset_tool_dispatch_state; export MCP_CALL_TMPDIR="$call_tmpdir"; _mcp_run_tool "$func_name" "$tool_name" "$arguments" "$call_root" ) \
             >"$output_file" 2>&1 </dev/null &
     else
         # No lifeline: run_mcp_server never ran in this shell, so there is
         # nothing for a sentinel to watch. The wrapper keeps the shape of the
         # loop-driven path, so both give the tool the same process group.
-        ( set +e; _reset_tool_dispatch_state; "$func_name" "$arguments" ) >"$output_file" 2>&1 </dev/null &
+        # shellcheck disable=SC2030,SC2031 # MCP_CALL_TMPDIR is exported for this call's wrapper alone; the dispatch shell must not keep it.
+        ( set +e; _reset_tool_dispatch_state; export MCP_CALL_TMPDIR="$call_tmpdir"; _mcp_run_tool "$func_name" "$tool_name" "$arguments" "$call_root" ) >"$output_file" 2>&1 </dev/null &
     fi
     pid=$!
     if [[ "$monitor_was_enabled" == "1" ]]; then
@@ -835,20 +867,42 @@ handle_tools_call() {
     # The call's files are released and the in-flight record truncated before
     # anything is built from them, so neither the response construction nor the
     # deferred replay below can run ahead of the clear.
-    # The output file and the sentinel pid file go first and the record second:
-    # those two paths exist nowhere but this subshell, so a teardown landing
-    # between the steps reads a record naming a path this dispatch has already
-    # released, and its removal is idempotent, so it loses nothing.
-    # docs/architecture.md §The in-flight record.
+    # The call root goes first and the record second: the root exists nowhere
+    # but this subshell and the record, so a teardown landing between the steps
+    # reads a record naming a root this dispatch has already released, and its
+    # removal is idempotent, so it loses nothing. Every path that reaches here
+    # has already waited for the wrapper and passed its group to
+    # _kill_tool_group, so no member of the call is left to write into the root
+    # as it is removed. docs/architecture.md §The in-flight record.
     local output=""
-    if [[ "$_MCP_CANCELLED" -eq 1 ]]; then
-        # A cancelled call was already answered by its teardown, which sends no
-        # response for the id, so its output is discarded and only the call's
-        # files are left to drop here.
-        rm -f -- "$output_file" "$sentinel_file"
-    else
+    local hook_text=""
+    local hook_refused=0
+    local exit_code="$_MCP_CHILD_STATUS"
+    # A cancelled call was already answered by its teardown, which sends no
+    # response for the id and has removed the call root.
+    if [[ "$_MCP_CANCELLED" -eq 0 ]]; then
         output=$(<"$output_file")
-        rm -f -- "$output_file" "$sentinel_file"
+        # _mcp_run_tool writes `hook-returned` as soon as the hook returns,
+        # whatever its status, so a `hook-running` with no `hook-returned` means
+        # the wrapper ended while the hook ran: the hook called `exit`, or a
+        # signal killed the wrapper. Either way the tool never ran. The capture
+        # is read only here, where nothing removed it.
+        # docs/architecture.md §Tool containment.
+        if [[ -e "$call_root/hook-running" && ! -e "$call_root/hook-returned" ]]; then
+            if [[ $exit_code -gt 128 ]]; then
+                hook_text="mcp_before_tool_call was killed by signal $((exit_code - 128)); tool $tool_name did not run."
+                log "ERROR" "Before-tool hook mcp_before_tool_call for tool $tool_name was killed (status $exit_code)"
+            else
+                hook_text="mcp_before_tool_call ended the call instead of returning; tool $tool_name did not run."
+                if [[ -s "$call_root/hook-output" ]]; then
+                    hook_text="${hook_text}"$'\n'"$(<"$call_root/hook-output")"
+                fi
+                log "ERROR" "Before-tool hook mcp_before_tool_call for tool $tool_name ended the call (status $exit_code)"
+            fi
+        elif [[ -e "$call_root/hook-refused" ]]; then
+            hook_refused=1
+        fi
+        _mcp_remove_call_root "$call_root"
     fi
     # Cleared once per dispatch, whichever way it ended — completed, cancelled,
     # or cleared by the teardown above. Clearing it is what keeps a shutdown from
@@ -859,9 +913,20 @@ handle_tools_call() {
     fi
 
     if [[ "$_MCP_CANCELLED" -eq 0 ]]; then
-        local exit_code="$_MCP_CHILD_STATUS"
-        if [[ $exit_code -ne 0 ]]; then
-            log "ERROR" "Tool $tool_name failed with exit code $exit_code"
+        if [[ -n "$hook_text" ]]; then
+            # The hook's exit status is discarded: the call is answered by the
+            # reason the tool did not run, not by the status the hook chose.
+            local hook_result
+            hook_result=$(jq -n -c \
+                --arg text "$hook_text" \
+                '{"content": [{"type": "text", "text": $text}], "isError": true}')
+            create_response "$id" "$hook_result"
+        elif [[ $exit_code -ne 0 ]]; then
+            if [[ $hook_refused -eq 1 ]]; then
+                log "ERROR" "before-tool hook refused tool $tool_name (status $exit_code)"
+            else
+                log "ERROR" "Tool $tool_name failed with exit code $exit_code"
+            fi
             local error_result
             error_result=$(jq -n -c \
                 --arg text "Error executing $tool_name: $output" \
@@ -1093,19 +1158,35 @@ _await_tool_call() {
 # _MCP_CANCEL_GRACE_SECONDS so a wedged hook cannot wedge its caller. The hook
 # is consumer code: it gets the call's arguments as its one argument, and
 # neither the client's stdin nor the protocol stream.
+# The hook gets the call's MCP_CALL_TMPDIR, so it can read what the call
+# recorded there; it runs before the call's group is signalled and before the
+# call root is removed.
 # Args: $1 = tool name, $2 = the call's arguments JSON. The teardown that runs
 #       from a signal handler passes an empty string: it reads the tool's name
 #       and process group out of the in-flight file, which records no
-#       arguments.
+#       arguments. $3 = the call's output file, which names the call root; when
+#       it is empty, absent, or names no call root, the hook runs with
+#       MCP_CALL_TMPDIR unset rather than set to an empty path.
 _run_cancel_hook() {
     local tool_name="$1"
     local arguments="$2"
+    local output_file="${3:-}"
 
     # A function only, as in handle_tools_call: `type` would also run a
     # `tool_<name>_cancel` executable found on PATH.
     local hook="tool_${tool_name}_cancel"
     if ! declare -F "$hook" >/dev/null; then
         return 0
+    fi
+
+    local call_root=""
+    local call_tmpdir=""
+    if [[ -n "$output_file" ]]; then
+        if _mcp_call_root_of call_root "$output_file"; then
+            call_tmpdir="${call_root}/tmp"
+        else
+            log "WARN" "refusing to derive a call root from ${output_file}: not a call root; cancel hook ${hook} runs with MCP_CALL_TMPDIR unset"
+        fi
     fi
 
     local hook_pid
@@ -1116,7 +1197,11 @@ _run_cancel_hook() {
         monitor_was_enabled=1
     fi
     set -m
-    ( if [[ -n "${_MCP_LIFELINE_FD:-}" ]]; then exec {_MCP_LIFELINE_FD}>&-; fi; set +e; "$hook" "$arguments" ) >/dev/null 2>&1 </dev/null &
+    # An empty MCP_CALL_TMPDIR would turn a hook's `rm -rf "$MCP_CALL_TMPDIR"/*`
+    # into a removal under `/`, so with no directory to name it is unset, which
+    # also drops a value inherited from the environment.
+    # shellcheck disable=SC2031 # The hook's MCP_CALL_TMPDIR is set in this subshell alone, independent of any wrapper's.
+    ( if [[ -n "${_MCP_LIFELINE_FD:-}" ]]; then exec {_MCP_LIFELINE_FD}>&-; fi; set +e; if [[ -n "$call_tmpdir" ]]; then export MCP_CALL_TMPDIR="$call_tmpdir"; else unset MCP_CALL_TMPDIR; fi; "$hook" "$arguments" ) >/dev/null 2>&1 </dev/null &
     hook_pid=$!
     if [[ "$monitor_was_enabled" == "1" ]]; then
         set -m
@@ -1177,18 +1262,146 @@ _kill_tool_group() {
     return 0
 }
 
-# The file a call's wrapper records its sentinel's pid in: a sibling of the
-# call's output file, named from the output file's own name so it belongs to
-# that call alone. It is derived rather than remembered because a shutdown
-# teardown reaches a running call through the in-flight record, which holds the
-# output file's path and nothing else. The name deliberately does not begin
-# "mcp-tool-output", so it never reads as a second output file of the call.
-# Args: $1 = the call's output file path
-_sentinel_pid_file() {
-    local output_file="$1"
+# Derive the call root an output path names, once the path is checked. The
+# variable named by the first argument is set to the root and the status is 0
+# only when the path is absolute, its basename is the `output` name
+# `handle_tools_call` mints, and its parent's basename is the `mcp-call.*` one
+# `mktemp -d` mints. Anything else sets that variable to the empty string and
+# returns 1, so a reader of a stale or corrupted in-flight record derives no
+# root from it and reads no file through it.
+# The root is named into a caller variable rather than printed, so no caller
+# pays a subshell fork for the check.
+# Args: $1 = the name of the variable to set, which the caller declares local,
+#       $2 = the output path
+# Returns: 0 when the path names a call root, else 1
+_mcp_call_root_of() {
+    local out_var="$1"
+    local output_path="${2:-}"
+    local root="${output_path%/*}"
 
-    [[ -z "$output_file" ]] && return 0
-    printf '%s/mcp-sentinel.%s' "${output_file%/*}" "${output_file##*/}"
+    if [[ $output_path == /* && ${output_path##*/} == "output" && ${root##*/} == mcp-call.* ]]; then
+        printf -v "$out_var" '%s' "$root"
+        return 0
+    fi
+    printf -v "$out_var" '%s' ""
+    return 1
+}
+
+# Remove a call root with its contents. A path that is not absolute, or whose
+# basename is not the `mcp-call.*` one `mktemp -d` mints, is refused with a
+# `WARN` and nothing is removed.
+# `rm -rf` cannot empty a directory the tool left without read, write or search
+# permission, so when the root survives the first pass those permissions are
+# restored and the removal is retried.
+# `-exec … \;` runs chmod on each directory as `find` reaches it, before `find`
+# reads it, so a directory under one the tool locked is reached too. `find`
+# does not follow symlinks unless told to and `-type d` does not match one, so
+# the mode of whatever a symlink in the root points at is never changed. A
+# failure is logged and never returned: it must not change the call's outcome
+# (a response still goes out, a cancelled call still gets none), and under
+# `set -o posix` a failing command in the dispatch would end the server instead.
+# Args: $1 = the call root, an absolute path
+# Returns: 0
+_mcp_remove_call_root() {
+    local root="$1"
+    local rm_error chmod_error=""
+    local rm_rc=0
+
+    # Only a path this SDK minted is ever removed: `mktemp -d` builds the root
+    # as an absolute `<TMPDIR>/mcp-call.*`. Anything else — a root a stale or
+    # corrupted in-flight record named — is refused before `rm` or `find` runs,
+    # so it cannot turn the removal loose on an arbitrary directory.
+    if [[ $root != /* || ${root##*/} != mcp-call.* ]]; then
+        log "WARN" "refusing to remove ${root}: not a call root"
+        return 0
+    fi
+
+    # _teardown_tool_call may have removed it: an absent path is not a failure.
+    [[ -e $root || -L $root ]] || return 0
+
+    rm_error=$(rm -rf -- "$root" 2>&1) || rm_rc=$?
+    if [[ -e $root || -L $root ]]; then
+        # No `--` end-of-options marker: BusyBox `find` may read it as a path,
+        # and every call site passes an absolute path, which cannot be an option.
+        chmod_error=$(find "$root" -type d ! -perm -u+rwx -exec chmod u+rwx {} \; 2>&1) || true
+        rm_rc=0
+        rm_error=$(rm -rf -- "$root" 2>&1) || rm_rc=$?
+    fi
+    if [[ $rm_rc -ne 0 || -e $root || -L $root ]]; then
+        log "WARN" "Cannot remove call directory ${root}: ${rm_error}${chmod_error:+ (restoring permissions: ${chmod_error})}"
+    fi
+    return 0
+}
+
+# Run a tool function behind the consumer's optional mcp_before_tool_call hook,
+# inside the call's wrapper subshell. Neither the hook nor the tool is forked
+# off: both run in the wrapper's shell, so a global variable the hook assigns,
+# a directory it changes to, and an EXIT trap it installs reach the tool. The
+# shell options are the exception: those the hook sets are put back before the
+# tool runs, and so are functions: what the hook defines reaches the tool but
+# not the steps this function runs once the hook has returned.
+# README.md §Running a step before every tool.
+# Args: $1 = tool function name, $2 = tool name, $3 = the call's arguments JSON,
+#       $4 = the call root, which holds the hook's capture file and markers
+# Outputs: a failed hook's captured output on stdout, which the wrapper has
+#          pointed at the call's output file; otherwise the tool's own output.
+# Returns: the hook's status when it is non-zero, else the tool's status
+_mcp_run_tool() {
+    local func_name="$1"
+    local tool_name="$2"
+    local arguments="$3"
+    local call_root="$4"
+
+    # `declare -F` matches a shell function only, as for the tool itself: an
+    # executable or alias named mcp_before_tool_call never runs as the hook.
+    if declare -F mcp_before_tool_call >/dev/null; then
+        local hook_status=0
+        local saved_set saved_shopt
+        saved_set=$(set +o)
+        saved_shopt=$(shopt -p)
+        # The marker outlives the wrapper only when the hook never returned —
+        # it called `exit` or a signal killed the wrapper — which is what
+        # handle_tools_call answers for once the wrapper is reaped. A bare
+        # redirection, so no command name the hook could shadow — `:` included —
+        # is reached and no PATH lookup happens.
+        # shellcheck disable=SC2188 # a commandless redirection is the point: any command name here is one the hook may have shadowed or taken off PATH.
+        >"$call_root/hook-running"
+        # A brace group, not a subshell: its redirection applies without a fork,
+        # so what the hook sets survives into the tool call below. The capture
+        # keeps a successful hook's output out of the tool result.
+        { mcp_before_tool_call "$tool_name" "$arguments"; } >"$call_root/hook-output" 2>&1 || hook_status=$?
+        # Every step below runs after the hook returned, so each one bypasses
+        # what the hook may have changed: a function it defined named `set`,
+        # `shopt` or `printf` must not take over the SDK's own steps, and a PATH
+        # it rewrote must not decide whether those steps can run. Nothing below
+        # reaches for an external command — each file is written with a bare
+        # redirection and the one command run is a builtin — so a hook that sets
+        # PATH=/nonexistent leaves no marker behind. The restore re-executes the
+        # snapshot with every command prefixed `builtin` for the same reason,
+        # since the snapshot's own `set` and `shopt` calls would otherwise
+        # resolve to the hook's functions. The tool call at the end is
+        # deliberately not bypassed: a function the hook defines reaches the
+        # tool. README.md §Running a step before every tool.
+        # Restored before anything else runs, so an errexit or nounset the hook
+        # turned on governs neither the steps below nor the tool.
+        builtin eval "builtin ${saved_set//$'\n'/$'\n'builtin }"
+        builtin eval "builtin ${saved_shopt//$'\n'/$'\n'builtin }"
+        # Written whatever the hook's status, and before the refusal branch: this
+        # plus `hook-running` is what tells handle_tools_call the hook returned
+        # rather than died. It is left in place with `hook-output`; the whole
+        # root goes when the call does.
+        # shellcheck disable=SC2188 # a commandless redirection is the point: any command name here is one the hook may have shadowed or taken off PATH.
+        >"$call_root/hook-returned"
+        if [[ $hook_status -ne 0 ]]; then
+            # Tells handle_tools_call that the non-zero status is the hook's
+            # refusal, not the tool's failure.
+            # shellcheck disable=SC2188 # a commandless redirection is the point: any command name here is one the hook may have shadowed or taken off PATH.
+            >"$call_root/hook-refused"
+            builtin printf '%s' "$(<"$call_root/hook-output")"
+            builtin return "$hook_status"
+        fi
+    fi
+    "$func_name" "$arguments"
 }
 
 # The pid recorded in a call's sentinel file. Empty when no record was written —
@@ -1261,12 +1474,15 @@ _teardown_tool_call() {
     local id="$4"
     local output_file="$5"
 
-    _run_cancel_hook "$tool_name" "$arguments"
+    _run_cancel_hook "$tool_name" "$arguments" "$output_file"
 
-    local sentinel_file
-    sentinel_file="$(_sentinel_pid_file "$output_file")"
-    local sentinel_pid
-    sentinel_pid="$(_sentinel_pid_for "$sentinel_file")"
+    local call_root=""
+    local sentinel_pid=""
+    if _mcp_call_root_of call_root "$output_file"; then
+        sentinel_pid="$(_sentinel_pid_for "${call_root}/sentinel")"
+    else
+        log "WARN" "refusing to derive a call root from ${output_file}: not a call root"
+    fi
 
     local alive_waited=0
     if kill -0 -- "-$pid" 2>/dev/null; then
@@ -1287,7 +1503,11 @@ _teardown_tool_call() {
     # which is what a cancellation is expected to look like.
     wait "$pid" || true
     _kill_tool_group "$pid" "$tool_name" "$output_file"
-    rm -f -- "$output_file" "$sentinel_file"
+    # A path that named no call root has no root to remove, and the check above
+    # already logged the refusal.
+    if [[ -n "$call_root" ]]; then
+        _mcp_remove_call_root "$call_root"
+    fi
     log "INFO" "Cancelled tools/call $id ($tool_name)"
 }
 
@@ -1484,10 +1704,16 @@ _server_teardown() {
     local inflight_pid=""
     local inflight_tool=""
     local inflight_output=""
+    local inflight_root=""
     local inflight_sentinel_file=""
     if [[ -n "${_MCP_INFLIGHT_FILE:-}" && -s "${_MCP_INFLIGHT_FILE}" ]]; then
         read -r inflight_pid inflight_tool inflight_output < "${_MCP_INFLIGHT_FILE}" || true
-        inflight_sentinel_file="$(_sentinel_pid_file "${inflight_output}")"
+    fi
+    # The record is not trusted to name a call: the root, and the sentinel path
+    # beside it, are derived only from an output path this SDK minted. Every
+    # read and every removal below is aimed through that one checked root.
+    if _mcp_call_root_of inflight_root "${inflight_output}"; then
+        inflight_sentinel_file="${inflight_root}/sentinel"
     fi
 
     # A pgid field of `-` is the tombstone: _kill_tool_group wrote it as it
@@ -1498,9 +1724,9 @@ _server_teardown() {
     # behaviour.
     if [[ -n "${inflight_pid}" && "${inflight_pid}" != "-" ]] \
         && kill -0 -- "-${inflight_pid}" 2>/dev/null; then
-        _run_cancel_hook "${inflight_tool}" ""
-        # The sentinel this call's wrapper recorded beside the output file is
-        # left out of the group's liveness exactly as in _teardown_tool_call: it
+        _run_cancel_hook "${inflight_tool}" "" "${inflight_output}"
+        # The sentinel this call's wrapper recorded in the call root is left
+        # out of the group's liveness exactly as in _teardown_tool_call: it
         # ignores TERM and waits on the lifeline, so counting it would hold this
         # teardown for the whole grace on every shutdown.
         local inflight_sentinel
@@ -1519,14 +1745,21 @@ _server_teardown() {
         log "INFO" "Stopped in-flight tool ${inflight_tool} (group ${inflight_pid}) on shutdown"
     fi
 
-    # The tool's output file is named nowhere but the dispatch subshell that
-    # created it, so a server going down on a signal has only the record to
-    # reach it; the sentinel pid file beside it is derived from that same path
-    # and is removed with it. This removal runs for a tombstone record too,
-    # which is the point of keeping the path in it. A teardown that found no
-    # call to stop leaves nothing to remove either way.
+    # The call root is named nowhere but the dispatch subshell that created it,
+    # so a server going down on a signal has only the record to reach it: the
+    # root is the directory of the output file the record names, and it is
+    # removed with everything in it after the group above has been stopped.
+    # This removal runs for a tombstone record too, which is the point of
+    # keeping the path in it. A teardown that found no call to stop leaves
+    # nothing to remove either way.
+    # The root removed here is the one checked above, so a record naming a path
+    # outside a call root leaves that path's parent alone.
     if [[ -n "${inflight_output}" ]]; then
-        rm -f -- "${inflight_output}" "${inflight_sentinel_file}"
+        if [[ -n "${inflight_root}" ]]; then
+            _mcp_remove_call_root "${inflight_root}"
+        else
+            log "WARN" "refusing to remove ${inflight_output%/*}: not a call root"
+        fi
     fi
 
     # The variables are cleared with the files they name: a later step in this
