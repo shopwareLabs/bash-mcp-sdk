@@ -105,13 +105,23 @@ setup() {
     export CHILD_PID_FILE="${BATS_TEST_TMPDIR}/child.pid"
     export CANCEL_HOOK_FILE="${BATS_TEST_TMPDIR}/cancel-hook.json"
     export HOOK_CHILD_PID_FILE="${BATS_TEST_TMPDIR}/hook-child.pid"
-    # The direct handle_tools_call tests source the core and call it for tools
-    # that are not in any list. An unreadable list is a rejection now, so they
-    # get a readable empty one: unlisted tools are not validated, which is the
-    # path those tests exercised when no list was set at all. The fixture server
-    # overrides this with its own list, so only the direct calls see it.
+    # The direct handle_tools_call tests source the core and dispatch the tools
+    # they define, so this list declares each of them: the tools list decides
+    # which tools a tools/call reaches, and a name it does not declare is
+    # answered -32601 before any function lookup. Every entry carries the
+    # inputSchema the call is validated against, and an entry without one
+    # answers an isError result instead. The fixture server overrides this with
+    # its own list, so only the direct calls see it.
     export MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
-    printf '{"tools": []}\n' > "${MCP_TOOLS_LIST_FILE}"
+    printf '%s\n' '{
+        "tools": [
+            {"name": "null_id_call", "inputSchema": {"type": "object"}},
+            {"name": "trivial", "inputSchema": {"type": "object"}},
+            {"name": "after_server_loop", "inputSchema": {"type": "object"}},
+            {"name": "monitor_state", "inputSchema": {"type": "object"}},
+            {"name": "fail_then_continue", "inputSchema": {"type": "object"}}
+        ]
+    }' > "${MCP_TOOLS_LIST_FILE}"
 }
 
 teardown() {

@@ -23,7 +23,7 @@ The parse gate refuses two different lines. A line jq cannot read fails the subs
 
 The id-type gate accepts a JSON string, and a number that is whole in two readings. `floor` converts its input to an IEEE-754 double, and at or above 2^52 the double spacing reaches 1. A literal such as `4503599627370496.5` is therefore already whole as a double, and `floor` alone cannot see its fraction. `tojson` renders the number from the literal jq parsed, which still carries it.
 
-`validate_tool_arguments` holds the same test for a declared `integer`. One gap survives both copies: a rendering that keeps an exponent falls back to the double-based verdict, so `1.5e-400` reads as an integer.
+`_mcp_validate_against_schema`, the validator behind `validate_tool_arguments` and `handle_tools_call`, holds the same test for a declared `integer`. One gap survives both copies: a rendering that keeps an exponent falls back to the double-based verdict, so `1.5e-400` reads as an integer.
 
 The notification arm sits between the version gate and the id-type gate. An empty id means the key was absent, so the message is a notification and none of the arms emits a response.
 
@@ -33,7 +33,19 @@ A valid id then routes by method. `initialize`, `tools/list` and `tools/call` go
 
 ## Tool containment
 
-`handle_tools_call` gates its `params` to an object before it reads `.name` and `.arguments`, so neither extraction can fail on a non-object. A tool name that does not match `^[a-zA-Z_][a-zA-Z0-9_]*$` answers `-32602`. A name with no `tool_<name>` function answers `-32601`. `.arguments` is read with `has("arguments")`, so a present `null` or `false` reaches the validator instead of defaulting to `{}`.
+`handle_tools_call` gates its `params` to an object before it reads `.name` and `.arguments`, so neither extraction can fail on a non-object. A tool name that does not match `^[a-zA-Z_][a-zA-Z0-9_]*$` answers `-32602`. `.arguments` is read with `has("arguments")`, so a present `null` or `false` reaches the validator instead of defaulting to `{}`.
+
+`_mcp_tool_schema` then looks the name up in the tools list with `.tools[]?`. It reads the list once and returns the entry's schema, and the validator checks the arguments against that schema, so the declaration check and the validation never disagree about what the list holds.
+
+| Lookup outcome | Answer |
+|---|---|
+| No entry names the tool | `-32601` |
+| The list cannot be read, or `select` errors on an element it cannot index, such as a number | `isError` result |
+| More than one entry names the tool | `isError` result |
+| The one entry has no `inputSchema`, or a `null` one | `isError` result |
+| One entry with a schema | continue |
+
+A declared name with no `tool_<name>` function answers `-32601`. The test is `declare -F`, which matches shell functions only, so an executable on `PATH` or an alias of that name never answers for a tool. `_mcp_validate_against_schema` then checks the arguments against the schema the lookup returned.
 
 The tool then runs in the background under `set -m`, which gives the job its own process group. `handle_tools_call` saves the shell's `monitor` setting and restores it after the spawn. The job is a wrapper subshell rather than the tool itself. That lets a second process sit in the tool's group and outlive the tool without outliving the group.
 
@@ -104,7 +116,7 @@ The sentinel is left out of that count. It waits on the lifeline rather than on 
 
 A `ps` that fails is unknown liveness, not an empty group. The unknown case degrades to `kill -0` on the whole group, which counts the sentinel and costs the full grace. Read as empty it would end the grace loop immediately and skip the SIGKILL, leaving a TERM-immune tool alive. The degraded path delays a kill rather than dropping one.
 
-`_run_cancel_hook` returns at once when the consumer defined no `tool_<name>_cancel`. Otherwise it runs the hook in a background group of its own, with stdin `/dev/null` and its output discarded. A hook still alive after the grace is SIGKILLed by group, and the kill is logged. A hook that exits non-zero is logged too, and neither outcome fails the call.
+`_run_cancel_hook` returns at once when no shell function `tool_<name>_cancel` is defined. It tests with `declare -F`, so an executable of that name on `PATH` is never run as a hook. Otherwise it runs the hook in a background group of its own, with stdin `/dev/null` and its output discarded. A hook still alive after the grace is SIGKILLed by group, and the kill is logged. A hook that exits non-zero is logged too, and neither outcome fails the call.
 
 No tombstone is written for the hook's group. The record names the call's group, which is still live at that point and has to stay named.
 
@@ -153,6 +165,7 @@ The branch also sets `_MCP_EOF_DRAIN`. `handle_tools_call` then touches the shut
 | One JSON-RPC line yields at most one response | `process_request` | §Request lifecycle |
 | A notification never produces a response | `process_request` | §Request lifecycle |
 | A request id is echoed back only when it is a string or an integer | `process_request` | §Request lifecycle |
+| A `tools/call` reaches only a shell function the tools list declares | `handle_tools_call`, `_mcp_tool_schema` | §Tool containment |
 | A tool function never reads the client's protocol stream | `handle_tools_call` | §Tool containment |
 | A tool leaves nothing running once its call ends | `_kill_tool_group` | §Tool containment |
 | A nested dispatch inside a tool cannot stop the server or overwrite the outer call's record | `_reset_tool_dispatch_state` | §Tool containment |

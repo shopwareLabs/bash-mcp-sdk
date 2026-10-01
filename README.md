@@ -46,7 +46,7 @@ There is no install step. Copy `lib/mcpserver_core.sh` into your project and `so
 | `handle_initialize`       | The `initialize` handler `process_request` routes to. Answers `protocolVersion`, `serverInfo` and `capabilities`. |
 | `handle_tools_list`       | The `tools/list` handler `process_request` routes to. Answers the `tools` array. |
 | `handle_tools_call`       | The `tools/call` handler `process_request` routes to. A consumer can drive it directly to dispatch one call without the read loop. |
-| `validate_tool_arguments` | Check a call's arguments against the tool's `inputSchema`.            |
+| `validate_tool_arguments` | Check a call's arguments against the tool's `inputSchema`. Rejects a tool that the tools list does not declare exactly once with a non-null `inputSchema`. |
 | `create_response`         | Build a JSON-RPC result envelope.                                     |
 | `create_error_response`   | Build a JSON-RPC error envelope. Optional 4th arg `data` (JSON value) is included when non-empty. |
 | `log`                     | Append to `MCP_LOG_FILE`, and to `MCP_EXTRA_LOG_FILE` when set.       |
@@ -94,9 +94,13 @@ tool_greet() {
 run_mcp_server
 ```
 
+`tools.json` decides which tools exist. A `tools/call` runs `tool_<name>` only when the list declares `<name>` and a shell function of that name is defined. A name the list does not declare answers `-32601`, even when a `tool_<name>` function is sourced. A declared name with no such function answers `-32601` too. An executable, alias or builtin named `tool_<name>` is never dispatched.
+
+The same rule holds for a nested `handle_tools_call` or `process_request` made from inside a tool. A plain shell call such as `tool_greet "$args"` is not a dispatch, so it runs whether or not the list declares the tool.
+
 A tool may also define an optional `tool_<name>_cancel` hook, which the server calls when the call is cancelled. *Cancelling and shutting down* below gives its contract.
 
-The hook is resolved by name. A tool whose own name ends in `_cancel` is therefore also the cancellation hook of whatever precedes that suffix. A tool named `foo_cancel` is dispatched as a tool, and it is called when `foo` is cancelled. Do not name a tool `<other>_cancel` unless that is what you mean.
+The hook is resolved by name, and only a shell function counts. A hook is not a tool: `tool_foo_cancel` is callable as tool `foo_cancel` only when `tools.json` declares `foo_cancel`. A declared tool named `foo_cancel` is still the cancellation hook of `foo`, and it is called when `foo` is cancelled. Do not declare a tool `<other>_cancel` unless that is what you mean.
 
 Every `inputSchema` in `tools.json` is enforced before the tool function runs. The keywords are `required`, `additionalProperties: false`, `type`, `pattern`, `minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum`, array `items.type` / `items.enum`, and `enum`.
 
@@ -104,7 +108,9 @@ A `type` — on a property or on `items` — may be one name or a list of altern
 
 A range bound applies only to a number-valued argument. A string, boolean, or other non-number carries no bound. A bound that is not itself a number is left unenforced, which also covers the JSON Schema draft-04 boolean form `"exclusiveMinimum": true`.
 
-Diagnostics report the most fundamental defect first, in that order. A tool with no `inputSchema` is dispatched unvalidated.
+Diagnostics report the most fundamental defect first, in that order.
+
+A declared tool whose entry has no `inputSchema`, or a `null` one, is not dispatched. The call returns an `isError` result instead. A name `tools.json` declares more than once also returns an `isError` result.
 
 A tool that exits non-zero returns its combined output as an `isError` result rather than killing the server.
 
