@@ -9,6 +9,7 @@ One file, `lib/mcpserver_core.sh`. It sources nothing and needs `jq`, plus `ps` 
 - Bash 4.1+ — the file allocates file descriptors with `{var}` redirection, which arrived in 4.1.
 - `jq` 1.7+ — below that floor, jq parses every number to a double. The validator's `integer` check then cannot see a fraction the double rounded away.
 - `ps` and `mkfifo` — the tool lifecycle. `run_mcp_server` creates the lifeline with `mkfifo` as it starts, and `ps` is reached only once a tool runs. BusyBox ships both, so an Alpine consumer needs no procps (why the code reads a full `ps` listing is in `docs/architecture.md` §Cancellation).
+- `/dev/stdin` — the SDK reads a tool result's text through it. On Linux it is a link into `/proc`.
 
 Sourcing the file checks the first two floors. A Bash below 4.1, a `jq` that is missing or cannot run, or a `jq` below 1.7 is refused on stderr. The refusal names the requirement and, where there is one, the version found. It adds remediation for the platform: its package manager's command where one can be determined, and a generic line otherwise.
 
@@ -127,6 +128,8 @@ Diagnostics report the most fundamental defect first, in that order.
 A declared tool whose entry has no `inputSchema`, or a `null` one, is not dispatched. The call returns an `isError` result instead. A name `tools.json` declares more than once also returns an `isError` result.
 
 A tool that exits non-zero returns its combined output as an `isError` result rather than killing the server.
+
+Tool output that is not valid UTF-8 comes back with replacement characters, and can lose a byte that follows an invalid one.
 
 > [!IMPORTANT]
 > Stdout is the protocol channel. A tool function's stdout becomes the tool result, so everything else a server wants to say goes through `log`. A stray `echo` outside a tool corrupts the stream.
@@ -278,6 +281,7 @@ find lib tests scripts .github/scripts -type f \( -name '*.sh' -o -name '*.bats'
 - MCP resources and prompts — tools only
 - Transports other than stdio
 - Concurrent request handling; the server loop is strictly sequential
+- A request `id`, `method` or tool name larger than the OS command-line argument limit: the request can go unanswered and the server can exit with status 126
 - Running the tool command anywhere but the local shell. Container, VM, and remote execution are a consumer concern; this SDK dispatches to a Bash function and nothing more.
 
 ### Why resources and prompts are not planned
