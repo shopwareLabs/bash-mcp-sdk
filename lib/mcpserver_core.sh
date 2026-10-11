@@ -434,7 +434,7 @@ _mcp_tool_schema() {
 # Validate call arguments against the tool's declared inputSchema, rejecting
 # arguments that are not a JSON object. The enforced keywords, the union-type
 # rule, the range-bound rule and the diagnostic precedence order are
-# README.md §API.
+# docs/server-contract.md §Tool functions.
 # The schema comes from _mcp_tool_schema, so a tool the tools list does not
 # declare exactly once with a non-null inputSchema is rejected rather than
 # skipped, and so is a tools list that cannot be read, whether it is missing,
@@ -480,13 +480,13 @@ _mcp_validate_against_schema() {
     local arguments="$2"
     local tool_name="$3"
 
-    # A non-object `arguments` is rejected in the first branch because every
-    # constraint below reads `$args | keys`, which errors on any other type and
-    # would take the whole schema down with it.
+    # A non-object `arguments` is rejected in its own branch because `check`
+    # applies `required`, `properties` and `additionalProperties` only to an
+    # object value, so a non-object would otherwise skip all three.
     local message rc
     rc=0
     # Schema and arguments go on stdin as two documents, clear of the E2BIG an oversized argument hits.
-    message=$(printf '%s\n%s' "$schema" "$arguments" | jq -s -r \
+    message=$(printf '%s\n%s' "$schema" "$arguments" | jq -s -r --arg tool "$tool_name" \
         '
         if length == 2 then . else error("expected one schema and one arguments document") end
         | .[0] as $schema | .[1] as $args |
@@ -532,7 +532,7 @@ _mcp_validate_against_schema() {
         # failed every declared alternative: with `integer` offered it is
         # necessarily non-integer and reads "number (non-integer)". A list
         # offering `number` accepts every number, so the `number` conjunct
-        # cannot fire at either call site — it keeps the label correct if the
+        # cannot fire at its call site — it keeps the label correct if the
         # function is ever called somewhere `type_ok` did not gate.
         def type_label(want; val):
             (type_names(want)) as $w
@@ -545,132 +545,179 @@ _mcp_validate_against_schema() {
               end;
         def type_expected(want):
             type_names(want) | join(" or ");
-        if ($args | type) != "object" then
+        # A property path: a top-level name stays bare, so its messages read as
+        # they did before nested checking; a nested one reads `parent.child`.
+        def sub_path($base; $k):
+            if $base == "" then $k else $base + "." + $k end;
+        # Emit one violation record per defect in value $v against schema $s,
+        # each tagged with its diagnostic class in `.c`. Every schema position
+        # (the root, a `properties` value, a schema-valued
+        # `additionalProperties`, `items`, a `oneOf` branch) is checked by this
+        # one function. Each keyword is its own comma-separated group, so a
+        # `// empty` yielding zero outputs for an absent keyword drops that
+        # keyword alone. $item marks an array element, whose own `type` and
+        # `enum` defects keep the `items` class and its formats.
+        def check($s; $v; $path; $item):
+            [ ($s.type // empty) as $t
+              | (type_names($t)) as $tn
+              # A malformed `type` — an empty list, or one carrying a
+              # non-string member — is left unenforced rather than rejecting
+              # every value.
+              | select(($tn | length) > 0 and all($tn[]; type == "string"))
+              | select((type_ok($t; $v)) | not)
+              | {c: (if $item then "items" else "type" end), issue: "type", p: $path,
+                 expected: type_expected($t), actual: type_label($t; $v), v: $v}
+            ] as $type_violations
+            | $type_violations[],
+              ( ($s.pattern // empty) as $pat
+                | select(($v | type) == "string")
+                | select(($v | test($pat)) | not)
+                | {c: "pattern", p: $path, pattern: $pat, v: $v} ),
+              # The number gate mirrors how `pattern` skips a non-string value.
+              # Where a `type` is declared, a non-number already failed the type
+              # check; where none is, a range keyword must not start rejecting
+              # strings. jq types `true` as "boolean", so a boolean is skipped
+              # here too and never coerced to 1 or 0.
+              ( select(($v | type) == "number")
+                # A malformed or absent bound is left unenforced, mirroring the
+                # malformed-`type` policy above: `select(type == "number")`
+                # yields zero outputs for an absent or non-number bound. That
+                # also leaves the JSON Schema draft-04 boolean form
+                # `"exclusiveMinimum": true` unenforced — its modifier semantics
+                # are not implemented here.
+                | ( ($s.minimum          | select(type == "number") | {rel: "below minimum",              bound: ., ok: ($v >= .)}),
+                    ($s.maximum          | select(type == "number") | {rel: "above maximum",              bound: ., ok: ($v <= .)}),
+                    ($s.exclusiveMinimum | select(type == "number") | {rel: "not above exclusiveMinimum", bound: ., ok: ($v >  .)}),
+                    ($s.exclusiveMaximum | select(type == "number") | {rel: "not below exclusiveMaximum", bound: ., ok: ($v <  .)}) )
+                | select(.ok | not)
+                | {c: "range", p: $path, rel: .rel, bound: .bound, v: $v} ),
+              # An element reports an `enum` defect only when its `type` held.
+              # A string `enum` fails the evaluation on both paths; `false`
+              # fails it on an element only.
+              ( if $item then
+                  select(($type_violations | length) == 0)
+                  | ($s.enum) as $e
+                  | select($e != null and ($e | any(.[]; . == $v) | not))
+                  | {c: "items", issue: "enum", p: $path, enum: $e, v: $v}
+                else
+                  ($s.enum // empty) as $e
+                  | select($e | any(.[]; . == $v) | not)
+                  | {c: "enum", p: $path, enum: $e, v: $v}
+                end ),
+              ( select(($v | type) == "object")
+                | ($v | keys)                    as $present
+                | ($s.properties // {})          as $props
+                | ($props | keys)                as $allowed
+                | ( ($s.required // [])[] | . as $r
+                    | select(($present | index($r)) == null)
+                    | {c: "missing", p: sub_path($path; $r)} ),
+                  ( select($s.additionalProperties == false)
+                    | [ $present[] | . as $p | select(($allowed | index($p)) == null) ] as $unknown
+                    | select(($unknown | length) > 0)
+                    | {c: "unknown", ps: ($unknown | map(sub_path($path; .))),
+                       allowed: ($allowed | map(sub_path($path; .)))} ),
+                  ( $present[] as $k
+                    | if ($allowed | index($k)) != null then
+                        check($props[$k]; $v[$k]; sub_path($path; $k); false)
+                      elif $s.additionalProperties == null
+                           or ($s.additionalProperties | type) == "boolean" then
+                        empty
+                      else
+                        check($s.additionalProperties; $v[$k]; sub_path($path; $k); false)
+                      end ) ),
+              ( select(($v | type) == "array")
+                | ($s.items // empty) as $items
+                | range(0; $v | length) as $i
+                | check($items; $v[$i]; $path + "[" + ($i | tostring) + "]"; true) ),
+              # A branch is satisfied when checking against it yields nothing;
+              # what failed inside a branch is not reported.
+              ( ($s.oneOf // empty) as $branches
+                | ([ $branches[] | select(([check(.; $v; $path; false)] | length) == 0) ] | length) as $n
+                | select($n != 1)
+                | {c: "oneOf", p: $path, n: $n, v: $v} );
+        # Dotted paths of every schema key outside the keywords `check` enforces
+        # and the annotations it ignores, walked over the same positions.
+        # A position holding something other than an object (an `items` array,
+        # say) makes `keys`, the index or the string concatenation fail, and
+        # that jq failure is a rejection.
+        def unenforced($s; $path):
+            ($s | keys[]) as $k
+            | ((if $path == "" then "" else $path + "." end) + $k) as $kp
+            | if ($k | IN("type", "properties", "required", "additionalProperties",
+                          "items", "enum", "pattern", "minimum", "maximum",
+                          "exclusiveMinimum", "exclusiveMaximum", "oneOf",
+                          "title", "description", "default", "examples", "format",
+                          "$schema", "$id", "$comment", "deprecated", "readOnly",
+                          "writeOnly") | not) then
+                $kp
+              elif $k == "properties" then
+                ($s.properties | keys[]) as $pk
+                | unenforced($s.properties[$pk]; $kp + "." + $pk)
+              elif $k == "additionalProperties" then
+                if $s.additionalProperties == null
+                   or ($s.additionalProperties | type) == "boolean" then empty
+                else unenforced($s.additionalProperties; $kp) end
+              elif $k == "items" then
+                if $s.items == null then empty else unenforced($s.items; $kp) end
+              elif $k == "oneOf" then
+                range(0; $s.oneOf | length) as $i
+                | unenforced($s.oneOf[$i]; $kp + "[" + ($i | tostring) + "]")
+              else empty end;
+        [ unenforced($schema; "") ] as $unenforced
+        | if ($unenforced | length) > 0 then
+            "Cannot validate arguments for " + $tool
+            + ": its inputSchema uses keyword(s) this validator does not enforce: "
+            + ($unenforced | join(", ")) + "."
+          elif ($args | type) != "object" then
             "Invalid arguments: expected a JSON object, got "
             + ($args | type) + "."
-        else
-          ($schema.required // [])               as $req
-        | ($args | keys)                        as $present
-        | (($schema.properties // {}) | keys)   as $allowed
-        | (($schema.properties // {}))          as $props
-        | [ $req[]     | . as $r | select(($present | index($r)) == null) ] as $missing
-        | ( if ($schema.additionalProperties == false)
-            then [ $present[] | . as $p | select(($allowed | index($p)) == null) ]
-            else [] end )                        as $unknown
-        | [ $present[] | . as $p
-            | ($props[$p].type // empty)          as $t
-            | select($t != null)
-            | (type_names($t))                     as $tn
-            # A malformed `type` — an empty list, or one carrying a non-string
-            # member — is left unenforced rather than rejecting every value.
-            | select(($tn | length) > 0 and all($tn[]; type == "string"))
-            | ($args[$p])                          as $v
-            | select((type_ok($t; $v)) | not)
-            | {p: $p, expected: type_expected($t), actual: type_label($t; $v), v: $v}
-          ]                                      as $invalid_type
-        | [ $present[] | . as $p
-            | ($props[$p].pattern // empty)       as $pat
-            | select($pat != null)
-            | ($args[$p])                          as $v
-            | select(($v | type) == "string")
-            | select(($v | test($pat)) | not)
-            | {p: $p, pattern: $pat, v: $v}
-          ]                                      as $invalid_pattern
-        | [ $present[] | . as $p
-            | ($args[$p])                          as $v
-            # The number gate mirrors how `pattern` skips a non-string value.
-            # Where a `type` is declared, a non-number already failed the type
-            # check; where none is, a range keyword must not start rejecting
-            # strings. jq types `true` as "boolean", so a boolean is skipped
-            # here too and never coerced to 1 or 0.
-            | select(($v | type) == "number")
-            # A property absent from `properties` yields null, and `// {}`
-            # keeps the field access below valid: a property permitted by
-            # `additionalProperties` carries no bound and no offender.
-            | ($props[$p] // {})                   as $ps
-            # A malformed or absent bound is left unenforced, mirroring the
-            # malformed-`type` policy above: `select(type == "number")` yields
-            # zero outputs for an absent or non-number bound, and a
-            # zero-output expression contributes no element to the array
-            # constructor. That also leaves the JSON Schema draft-04 boolean
-            # form `"exclusiveMinimum": true` unenforced — its modifier
-            # semantics are not implemented here.
-            | ( [ ($ps.minimum          | select(type == "number") | {rel: "below minimum",              bound: ., ok: ($v >= .)}),
-                  ($ps.maximum          | select(type == "number") | {rel: "above maximum",              bound: ., ok: ($v <= .)}),
-                  ($ps.exclusiveMinimum | select(type == "number") | {rel: "not above exclusiveMinimum", bound: ., ok: ($v >  .)}),
-                  ($ps.exclusiveMaximum | select(type == "number") | {rel: "not below exclusiveMaximum", bound: ., ok: ($v <  .)}) ][] )
-            | select(.ok | not)
-            | {p: $p, rel: .rel, bound: .bound, v: $v}
-          ]                                      as $out_of_range
-        | [ $present[] | . as $p
-            | ($props[$p].items // empty)         as $items
-            | select($items != null)
-            | ($args[$p])                          as $v
-            | select(($v | type) == "array")
-            # Plain field access, not `// empty`: `.items` may declare only
-            # one of `type`/`enum`. A missing key yields `null` here (one
-            # output), so the other, present constraint still reaches the
-            # comprehension below. `// empty` on either would yield zero
-            # outputs when that key is absent, and an `as` binding with zero
-            # outputs runs its body zero times — silently discarding every
-            # element of this property, including violations of the
-            # constraint that *was* declared.
-            | ($items.type)                        as $it
-            | ($items.enum)                        as $ie
-            | ( $v | to_entries[]
-                | . as $entry
-                | ($entry.value)                    as $ev
-                | ($entry.key)                       as $idx
-                | if ($it != null
-                      and ((type_names($it)) as $itn
-                           | ($itn | length) > 0 and all($itn[]; type == "string"))
-                      and (type_ok($it; $ev) | not)) then
-                    {p: $p, index: $idx, issue: "type", expected: type_expected($it), actual: type_label($it; $ev), v: $ev}
-                  elif ($ie != null and ($ie | index($ev)) == null) then
-                    {p: $p, index: $idx, issue: "enum", enum: $ie, v: $ev}
-                  else empty end
-              )
-          ]                                      as $invalid_items
-        | [ $present[] | . as $p
-            | ($props[$p].enum // empty) as $enum
-            | ($args[$p])                            as $v
-            | select(($enum | index($v)) == null)
-            | {p: $p, v: $v, enum: $enum}
-          ]                                      as $invalid_enum
-        | if   ($missing | length) > 0 then
-            "Missing required parameter(s): " + ($missing | join(", ")) + "."
-          elif ($unknown | length) > 0 then
-            "Unknown parameter(s): " + ($unknown | join(", "))
-            + ". Allowed parameters: " + ($allowed | join(", ")) + "."
-          elif ($invalid_type | length) > 0 then
-            "Invalid type(s): " + ($invalid_type | map(
-                .p + " expected " + .expected + ", got " + .actual
-                + " (" + (.v | tojson) + ")"
-              ) | join("; ")) + "."
-          elif ($invalid_pattern | length) > 0 then
-            "Invalid value(s): " + ($invalid_pattern | map(
-                .p + "=" + (.v | tojson) + " does not match pattern " + .pattern
-              ) | join("; ")) + "."
-          elif ($out_of_range | length) > 0 then
-            "Out-of-range value(s): " + ($out_of_range | map(
-                .p + "=" + (.v | tojson) + " " + .rel + " " + (.bound | tojson)
-              ) | join("; ")) + "."
-          elif ($invalid_items | length) > 0 then
-            "Invalid array item(s): " + ($invalid_items | map(
-                if .issue == "type" then
-                  .p + "[" + (.index | tostring) + "] expected " + .expected
-                  + ", got " + .actual + " (" + (.v | tojson) + ")"
-                else
-                  .p + "[" + (.index | tostring) + "]=" + (.v | tojson)
-                  + " (allowed: " + (.enum | join(", ")) + ")"
-                end
-              ) | join("; ")) + "."
-          elif ($invalid_enum | length) > 0 then
-            "Invalid value(s): " + ($invalid_enum | map(
-                .p + "=\"" + (.v | tostring) + "\" (allowed: " + (.enum | join(", ")) + ")"
-              ) | join("; ")) + "."
-          else "" end
-        end
+          else
+            # The highest-ranked class present anywhere in the tree decides the
+            # message, and every violation of that class is named in tree order.
+            # A violation at the root schema has an empty path and reads `arguments`.
+            [ check($schema; $args; ""; false) ] as $all
+            | def of($c): $all | map(select(.c == $c));
+            def shown: if . == "" then "arguments" else . end;
+            if (of("missing") | length) > 0 then
+              "Missing required parameter(s): " + (of("missing") | map(.p) | join(", ")) + "."
+            elif (of("unknown") | length) > 0 then
+              "Unknown parameter(s): " + (of("unknown") | map(.ps[]) | join(", "))
+              + ". Allowed parameters: " + (of("unknown") | map(.allowed[]) | join(", ")) + "."
+            elif (of("type") | length) > 0 then
+              "Invalid type(s): " + (of("type") | map(
+                  (.p | shown) + " expected " + .expected + ", got " + .actual
+                  + " (" + (.v | tojson) + ")"
+                ) | join("; ")) + "."
+            elif (of("pattern") | length) > 0 then
+              "Invalid value(s): " + (of("pattern") | map(
+                  .p + "=" + (.v | tojson) + " does not match pattern " + .pattern
+                ) | join("; ")) + "."
+            elif (of("range") | length) > 0 then
+              "Out-of-range value(s): " + (of("range") | map(
+                  .p + "=" + (.v | tojson) + " " + .rel + " " + (.bound | tojson)
+                ) | join("; ")) + "."
+            elif (of("items") | length) > 0 then
+              "Invalid array item(s): " + (of("items") | map(
+                  if .issue == "type" then
+                    .p + " expected " + .expected
+                    + ", got " + .actual + " (" + (.v | tojson) + ")"
+                  else
+                    .p + "=" + (.v | tojson)
+                    + " (allowed: " + (.enum | join(", ")) + ")"
+                  end
+                ) | join("; ")) + "."
+            elif (of("enum") | length) > 0 then
+              "Invalid value(s): " + (of("enum") | map(
+                  (.p | shown) + "=\"" + (.v | tostring) + "\" (allowed: " + (.enum | join(", ")) + ")"
+                ) | join("; ")) + "."
+            elif (of("oneOf") | length) > 0 then
+              "Invalid value(s): " + (of("oneOf") | map(
+                  (.p | shown) + "=" + (.v | tojson)
+                  + (if .n == 0 then " matches no oneOf alternative"
+                     else " matches " + (.n | tostring) + " oneOf alternatives" end)
+                ) | join("; ")) + "."
+            else "" end
+          end
         ' 2>/dev/null) || rc=$?
     if [[ $rc -ne 0 ]]; then
         printf '%s' "Cannot validate arguments for ${tool_name}: they could not be evaluated against its schema."

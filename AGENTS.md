@@ -74,7 +74,7 @@ Bash arithmetic and the `jq` version comparison sit in `_mcp_`-prefixed helpers 
 
 ## Testing
 
-Setup and run commands live in `README.md` §Testing. On top of them, two conventions apply. Every change to `lib/mcpserver_core.sh` extends its suite in the same commit, and `tests/` is the only place the validator's diagnostic precedence (missing > unknown > type > pattern > range > items > enum) is pinned. Suites locate the repository through `tests/test_helper/common_setup.bash`, which walks up to the directory containing `.bats/`, so they work from any invocation directory but fail confusingly when `setup-bats.sh` has never run.
+Setup and run commands live in `README.md` §Testing. On top of them, two conventions apply. Every change to `lib/mcpserver_core.sh` extends its suite in the same commit, and `tests/` is the only place the validator's diagnostic precedence (missing > unknown > type > pattern > range > items > enum > oneOf) is pinned. Suites locate the repository through `tests/test_helper/common_setup.bash`, which walks up to the directory containing `.bats/`, so they work from any invocation directory but fail confusingly when `setup-bats.sh` has never run.
 
 ## Releasing
 

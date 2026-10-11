@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- The validator enforces `oneOf`: a value must pass exactly one branch. A value matching no branch or more than one is rejected with `Invalid value(s): <path>=<value> matches no oneOf alternative.` or `... matches <n> oneOf alternatives.`, reported after every other class of defect.
+
+### Changed
+
+- The validator checks nested schemas. Every keyword it enforces now applies at every depth: in the properties of an object-valued property, in a schema given as `additionalProperties`, in `items`, and in each `oneOf` branch. Previously the checks stopped at the top-level properties and their `items.type` and `items.enum`, so a nested defect, a value failing a schema-valued `additionalProperties`, and a `pattern` inside `items` were accepted. A nested defect names its path, such as `options.limit` or `tags[1]`. A defect in a top-level property is worded as before.
+- A tool whose `inputSchema` uses a keyword the validator does not enforce returns an `isError` result and does not run. The message is `Cannot validate arguments for <tool>: its inputSchema uses keyword(s) this validator does not enforce: <paths>.`, with each keyword's path, such as `properties.s.minLength`. The keyword was previously ignored. The annotation keywords `title`, `description`, `default`, `examples`, `format`, `$schema`, `$id`, `$comment`, `deprecated`, `readOnly` and `writeOnly` are still accepted.
+
+### Fixed
+
+- `enum` no longer accepts an array value made of allowed members. `{"a": ["x", "y"]}` against `"enum": ["x", "y"]` is rejected, as is an array element equal to the members of an `items.enum`.
+
 ## [5.2.1] - 2026-10-11
 
 ### Fixed

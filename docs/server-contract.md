@@ -40,13 +40,19 @@ A tool may also define an optional `tool_<name>_cancel` hook, which the server c
 
 The hook is resolved by name, and only a shell function counts. A hook is not a tool: `tool_foo_cancel` is callable as tool `foo_cancel` only when `tools.json` declares `foo_cancel`. A declared tool named `foo_cancel` is still the cancellation hook of `foo`, and it is called when `foo` is cancelled. Do not declare a tool `<other>_cancel` unless that is what you mean.
 
-Every `inputSchema` in `tools.json` is enforced before the tool function runs. The keywords are `required`, `additionalProperties: false`, `type`, `pattern`, `minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum`, array `items.type` / `items.enum`, and `enum`.
+Every `inputSchema` in `tools.json` is enforced before the tool function runs. The keywords are `required`, `properties`, `additionalProperties`, `type`, `pattern`, `minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum`, `items`, `enum`, and `oneOf`.
+
+These keywords apply inside nested schemas too: a property's own schema, a schema given as `additionalProperties`, `items`, and each `oneOf` branch. `additionalProperties: false` rejects undeclared properties. A schema there checks each undeclared property's value. A nested defect names its path, such as `options.limit` or `tags[1]`.
+
+A value satisfies `oneOf` when it passes exactly one branch. Matching no branch, or more than one, is a defect. Keywords next to `oneOf` are still checked.
+
+The annotation keywords `title`, `description`, `default`, `examples`, `format`, `$schema`, `$id`, `$comment`, `deprecated`, `readOnly` and `writeOnly` are accepted and not checked. A schema using any other keyword, `minLength` or `anyOf` for example, is not dispatched. The call returns an `isError` result naming the path of each such keyword.
 
 A `type` — on a property or on `items` — may be one name or a list of alternatives (e.g. `"type": ["integer", "string"]`). A value satisfies it by matching any member.
 
 A range bound applies only to a number-valued argument. A string, boolean, or other non-number carries no bound. A bound that is not itself a number is left unenforced, which also covers the JSON Schema draft-04 boolean form `"exclusiveMinimum": true`.
 
-Diagnostics report the most fundamental defect first, in that order.
+Diagnostics report one class of defect, the first in this order that occurs anywhere in the arguments: missing parameter, unknown parameter, type, pattern, range, array item type or enum, enum, `oneOf`. Every defect of that class is listed.
 
 A declared tool whose entry has no `inputSchema`, or a `null` one, is not dispatched. The call returns an `isError` result instead. A name `tools.json` declares more than once also returns an `isError` result.
 
