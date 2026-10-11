@@ -17,7 +17,9 @@
 #   - a server configuration over 1.1 MB is answered whole on initialize;
 #   - create_response and create_error_response, called directly, build a
 #     1.1 MB result and 1.1 MB data exactly, and fail with status 5 and nothing
-#     on stdout for a result or data that is not exactly one JSON document.
+#     on stdout for a result or data that is not exactly one JSON document;
+#   - validate_tool_arguments, called directly, rejects arguments that hold two
+#     JSON documents as not evaluable, rather than validating the first.
 # Protocol cases drive a throwaway server over the FIFO client harness. Builder
 # cases source the SDK into the test shell. Payloads are written to files and
 # handed to jq with --rawfile, never as arguments.
@@ -293,4 +295,11 @@ _source_sdk() {
     run --separate-stderr create_error_response 1 -32603 m $'{}\n{}'
     assert_equal "${status}" 5
     assert_output ''
+}
+
+@test "validate_tool_arguments rejects arguments holding two JSON documents as not evaluable" {
+    _source_sdk
+    run validate_tool_arguments record_args '{"text": "aaa"} {"evil": "x"}'
+    assert_equal "${status}" 1
+    assert_output "Cannot validate arguments for record_args: they could not be evaluated against its schema."
 }

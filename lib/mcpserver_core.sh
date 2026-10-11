@@ -263,13 +263,12 @@ _configure_extra_log_file() {
 }
 
 # Read one JSON document from a file and print it compact when it is a JSON
-# object; prints nothing and returns 1 otherwise. README.md §API.
-# Its callers pipe this output to jq and index it — `.tools` in
-# handle_tools_list and _mcp_tool_schema, `.protocolVersion`, `.serverInfo`
-# and `.capabilities` in handle_initialize — so only an object is usable: an
-# index of any other type either errors or yields `null` in place of the
-# caller's key, and a `null` or `false` document is that accident rather than
-# a configuration. Never a
+# object; prints nothing and returns 1 otherwise. README.md §API. Its callers
+# pipe this output to jq and index it — `.tools` in handle_tools_list and
+# _mcp_tool_schema, `.protocolVersion`, `.serverInfo` and `.capabilities` in
+# handle_initialize — so only an object is usable: an index of any other type
+# either errors or yields `null` in place of the caller's key, and a `null` or
+# `false` document is that accident rather than a configuration. Never a
 # fallback: each caller answers the failure instead of treating the
 # configuration as empty, so a degraded result is not passed off as a correct
 # one. `jq -e` is not used to decide the parse — its exit status comes from the
