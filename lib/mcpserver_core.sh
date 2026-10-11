@@ -264,11 +264,12 @@ _configure_extra_log_file() {
 
 # Read one JSON document from a file and print it compact when it is a JSON
 # object; prints nothing and returns 1 otherwise. README.md §API.
-# The callers both hand this output to `--argjson` and index it — `.tools` in
-# handle_tools_list, `.protocolVersion`, `.serverInfo` and `.capabilities` in
-# handle_initialize — so only an object is usable: an index of any other type
-# either errors or yields `null` in place of the caller's key, and a `null` or
-# `false` document is that accident rather than a configuration. Never a
+# Its callers pipe this output to jq and index it — `.tools` in
+# handle_tools_list and _mcp_tool_schema, `.protocolVersion`, `.serverInfo`
+# and `.capabilities` in handle_initialize — so only an object is usable: an
+# index of any other type either errors or yields `null` in place of the
+# caller's key, and a `null` or `false` document is that accident rather than
+# a configuration. Never a
 # fallback: each caller answers the failure instead of treating the
 # configuration as empty, so a degraded result is not passed off as a correct
 # one. `jq -e` is not used to decide the parse — its exit status comes from the
@@ -292,10 +293,10 @@ create_response() {
     local id="$1"
     local result="$2"
 
-    jq -n -c \
+    # The result goes on stdin: as an argument, one above the OS argument limit fails the exec with E2BIG.
+    printf '%s' "$result" | jq -c -s \
         --argjson id "$id" \
-        --argjson result "$result" \
-        '{"jsonrpc": "2.0", "id": $id, "result": $result}'
+        'if length == 1 then {"jsonrpc": "2.0", "id": $id, "result": .[0]} else error("create_response: result must be exactly one JSON document") end'
 }
 
 create_error_response() {
@@ -311,13 +312,22 @@ create_error_response() {
             --arg message "$message" \
             '{"jsonrpc": "2.0", "id": $id, "error": {"code": $code, "message": $message}}'
     else
-        jq -n -c \
+        # The data goes on stdin for the same E2BIG reason as create_response's result.
+        printf '%s' "$data" | jq -c -s \
             --argjson id "$id" \
             --argjson code "$code" \
             --arg message "$message" \
-            --argjson data "$data" \
-            '{"jsonrpc": "2.0", "id": $id, "error": {"code": $code, "message": $message, "data": $data}}'
+            'if length == 1 then {"jsonrpc": "2.0", "id": $id, "error": {"code": $code, "message": $message, "data": .[0]}} else error("create_error_response: data must be exactly one JSON document") end'
     fi
+}
+
+# Print a compact tool result: $1 is the isError flag (true|false), $2 the text.
+_mcp_tool_text_result() {
+    # The text goes on stdin to stay clear of E2BIG; --rawfile, not -Rs, because -R splits a multibyte character at a read-chunk boundary below jq 1.8.2 (jq#3389).
+    printf '%s' "$2" | jq -n -c \
+        --argjson is_error "$1" \
+        --rawfile text /dev/stdin \
+        '{"content": [{"type": "text", "text": $text}], "isError": $is_error}'
 }
 
 handle_initialize() {
@@ -333,12 +343,11 @@ handle_initialize() {
     fi
 
     local result
-    result=$(jq -n -c \
-        --argjson config "$config" \
+    result=$(printf '%s' "$config" | jq -c \
         '{
-            "protocolVersion": ($config.protocolVersion // "2024-11-05"),
-            "serverInfo": ($config.serverInfo // {"name": "mcp-server", "version": "1.0.0"}),
-            "capabilities": ($config.capabilities // {"tools": {}})
+            "protocolVersion": (.protocolVersion // "2024-11-05"),
+            "serverInfo": (.serverInfo // {"name": "mcp-server", "version": "1.0.0"}),
+            "capabilities": (.capabilities // {"tools": {}})
         }')
 
     create_response "$id" "$result"
@@ -355,11 +364,8 @@ handle_tools_list() {
         return
     fi
 
-    local tools
-    tools=$(echo "$tools_config" | jq -c '.tools // []')
-
     local result
-    result=$(jq -n -c --argjson tools "$tools" '{"tools": $tools}')
+    result=$(printf '%s' "$tools_config" | jq -c '{"tools": (.tools // [])}')
 
     create_response "$id" "$result"
 }
@@ -480,10 +486,11 @@ _mcp_validate_against_schema() {
     # would take the whole schema down with it.
     local message rc
     rc=0
-    message=$(jq -n -r \
-        --argjson schema "$schema" \
-        --argjson args "$arguments" \
+    # Schema and arguments go on stdin as two documents, clear of the E2BIG an oversized argument hits.
+    message=$(printf '%s\n%s' "$schema" "$arguments" | jq -s -r \
         '
+        if length == 2 then . else error("expected one schema and one arguments document") end
+        | .[0] as $schema | .[1] as $args |
         # A declared `type` is one name or a list of alternatives, so it is
         # normalized to a list and one comparison serves both forms.
         # `"integer"` treats a whole-valued JSON number as satisfying it (JSON
@@ -741,9 +748,7 @@ handle_tools_call() {
     if [[ $lookup_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name argument validation failed: $schema"
         local lookup_result
-        lookup_result=$(jq -n -c \
-            --arg text "$schema" \
-            '{"content": [{"type": "text", "text": $text}], "isError": true}')
+        lookup_result=$(_mcp_tool_text_result true "$schema")
         create_response "$id" "$lookup_result"
         return
     fi
@@ -763,9 +768,7 @@ handle_tools_call() {
     if [[ $validation_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name argument validation failed: $validation_error"
         local invalid_result
-        invalid_result=$(jq -n -c \
-            --arg text "$validation_error" \
-            '{"content": [{"type": "text", "text": $text}], "isError": true}')
+        invalid_result=$(_mcp_tool_text_result true "$validation_error")
         create_response "$id" "$invalid_result"
         return
     fi
@@ -783,9 +786,7 @@ handle_tools_call() {
     if [[ $root_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name not run: cannot create its call directory in ${TMPDIR:-/tmp}: ${call_root}"
         local setup_result
-        setup_result=$(jq -n -c \
-            --arg text "Cannot run ${tool_name}: its call directory could not be created." \
-            '{"content": [{"type": "text", "text": $text}], "isError": true}')
+        setup_result=$(_mcp_tool_text_result true "Cannot run ${tool_name}: its call directory could not be created.")
         create_response "$id" "$setup_result"
         return
     fi
@@ -804,9 +805,7 @@ handle_tools_call() {
         log "ERROR" "Tool $tool_name not run: cannot create MCP_CALL_TMPDIR ${call_tmpdir}: ${mkdir_error}"
         _mcp_remove_call_root "$call_root"
         local setup_result
-        setup_result=$(jq -n -c \
-            --arg text "Cannot run ${tool_name}: its call directory could not be created." \
-            '{"content": [{"type": "text", "text": $text}], "isError": true}')
+        setup_result=$(_mcp_tool_text_result true "Cannot run ${tool_name}: its call directory could not be created.")
         create_response "$id" "$setup_result"
         return
     fi
@@ -917,9 +916,7 @@ handle_tools_call() {
             # The hook's exit status is discarded: the call is answered by the
             # reason the tool did not run, not by the status the hook chose.
             local hook_result
-            hook_result=$(jq -n -c \
-                --arg text "$hook_text" \
-                '{"content": [{"type": "text", "text": $text}], "isError": true}')
+            hook_result=$(_mcp_tool_text_result true "$hook_text")
             create_response "$id" "$hook_result"
         elif [[ $exit_code -ne 0 ]]; then
             if [[ $hook_refused -eq 1 ]]; then
@@ -928,15 +925,11 @@ handle_tools_call() {
                 log "ERROR" "Tool $tool_name failed with exit code $exit_code"
             fi
             local error_result
-            error_result=$(jq -n -c \
-                --arg text "Error executing $tool_name: $output" \
-                '{"content": [{"type": "text", "text": $text}], "isError": true}')
+            error_result=$(_mcp_tool_text_result true "Error executing $tool_name: $output")
             create_response "$id" "$error_result"
         else
             local result
-            result=$(jq -n -c \
-                --arg text "$output" \
-                '{"content": [{"type": "text", "text": $text}], "isError": false}')
+            result=$(_mcp_tool_text_result false "$output")
             create_response "$id" "$result"
         fi
     fi

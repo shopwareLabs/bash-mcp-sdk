@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+
+- A tool result, the tools list and the server configuration larger than the OS command-line argument limit no longer leave the request unanswered or end the server, and `arguments` that large are no longer rejected as not evaluable against the tool's schema. That data now reaches `jq` on stdin. `create_response` and `create_error_response` exit 5 instead of 2 when `result`, or a non-empty `data`, is not exactly one JSON document.
+
 ## [5.2.0] - 2026-10-01
 
 ### Added

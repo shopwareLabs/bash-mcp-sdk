@@ -128,6 +128,8 @@ A declared tool whose entry has no `inputSchema`, or a `null` one, is not dispat
 
 A tool that exits non-zero returns its combined output as an `isError` result rather than killing the server.
 
+A request `id` or `method` larger than the OS command-line argument limit is not supported: the request goes unanswered and the server exits with status 126.
+
 > [!IMPORTANT]
 > Stdout is the protocol channel. A tool function's stdout becomes the tool result, so everything else a server wants to say goes through `log`. A stray `echo` outside a tool corrupts the stream.
 
