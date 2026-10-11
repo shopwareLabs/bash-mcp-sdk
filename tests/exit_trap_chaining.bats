@@ -221,9 +221,10 @@ BODY
 @test "a subshell-wrapped call runs the caller's EXIT handler exactly once" {
     local marker_file="${BATS_TEST_TMPDIR}/wrapped-marker"
 
-    # The wrapped shape the README prescribes: the handler is installed in this
-    # shell, and the call is isolated in a subshell. The subshell does not
-    # capture the handler, so it runs once, from the wrapping shell's own exit.
+    # The wrapped shape docs/server-contract.md prescribes: the handler is
+    # installed in this shell, and the call is isolated in a subshell. The
+    # subshell does not capture the handler, so it runs once, from the
+    # wrapping shell's own exit.
     cat > "${BATS_TEST_TMPDIR}/server.sh" <<SERVER
 #!/usr/bin/env bash
 set -euo pipefail

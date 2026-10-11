@@ -33,10 +33,11 @@
 - `docs.surfaces` =
   | Surface | Owns | Shape | Single-owner |
   |---|---|---|---|
-  | `README.md` | Pitch, requirements, install, the API and configuration-variable tables, the writing-a-server guide, the vendoring recipe, test commands, the not-supported list, license pointer | Emoji-prefixed H2s | enforced |
+  | `README.md` | Pitch, requirements, install, the API and configuration-variable tables, the minimal server example, the vendoring recipe, test commands, the not-supported list, license pointer | Emoji-prefixed H2s | enforced |
   | `AGENTS.md` | Agent routing (Before-editing pointers, the Navigation table), the scope boundary, the compatibility contract, the stdout discipline, testing conventions, the release procedure | Orientation line, `## Before editing`, `## Navigation`, then the machine-owned H2 sections; never inlines `README.md` — it points into it by `§Heading` | enforced |
   | `SECURITY.md` | Vulnerability reporting, the DevSec baseline, the consumer-code clarification | H2 sections separated by rules | enforced |
-  | `docs/architecture.md` | The cross-function runtime design: request lifecycle, tool containment, the lifeline sentinel, the in-flight record and its tombstone, cancellation, shutdown, the partial-line handoff, and the invariant-to-owner index | Orientation paragraph, then the fixed H2 set; states mechanism only, never the consumer contract `README.md` owns | enforced |
+  | `docs/architecture.md` | The cross-function runtime design: request lifecycle, tool containment, the lifeline sentinel, the in-flight record and its tombstone, cancellation, shutdown, the partial-line handoff, and the invariant-to-owner index | Orientation paragraph, then the fixed H2 set; states mechanism only, never the consumer contract `docs/server-contract.md` owns | enforced |
+  | `docs/server-contract.md` | The consumer contract: dependencies and PATH, configuration-file and protocol handling, tool functions, the before-tool step, per-call files, cancelling and shutting down, keeping the vendored copy current, why resources and prompts are not planned | Orientation paragraph, then H2 sections; `README.md` links into it per section | enforced |
   | `CLAUDE.md` | Nothing of its own | A single `@AGENTS.md` line | exempt — a committed include, never carries content |
   | `CHANGELOG.md` | The per-version record of what changed | Keep a Changelog: `## [Unreleased]`, then `## [X.Y.Z] - YYYY-MM-DD` with `### Added` / `### Changed` / `### Fixed` | exempt — a version entry necessarily restates what the other surfaces describe as current behavior |
 

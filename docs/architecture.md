@@ -2,7 +2,7 @@
 
 This document owns the cross-function runtime design of `lib/mcpserver_core.sh`. It covers the path of one request, the containment of a tool call, cancellation, shutdown, and the partial-line handoff.
 
-`README.md` owns the consumer contract: writing a tool function, the cancel hook's contract, the environment-variable table, the `inputSchema` keywords, install and vendoring. The compatibility contract and the stdout discipline live in `AGENTS.md`. This document points at `AGENTS.md` §Compatibility contract and `AGENTS.md` §Stdout discipline rather than restating either.
+`docs/server-contract.md` owns the consumer contract: writing a tool function, the cancel hook's contract and the `inputSchema` keywords. `README.md` owns the environment-variable table, install and vendoring. The compatibility contract and the stdout discipline live in `AGENTS.md`. This document points at `AGENTS.md` §Compatibility contract and `AGENTS.md` §Stdout discipline rather than restating either.
 
 ## Request lifecycle
 

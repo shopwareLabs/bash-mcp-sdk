@@ -1332,7 +1332,7 @@ _mcp_remove_call_root() {
 # shell options are the exception: those the hook sets are put back before the
 # tool runs, and so are functions: what the hook defines reaches the tool but
 # not the steps this function runs once the hook has returned.
-# README.md §Running a step before every tool.
+# docs/server-contract.md §Running a step before every tool.
 # Args: $1 = tool function name, $2 = tool name, $3 = the call's arguments JSON,
 #       $4 = the call root, which holds the hook's capture file and markers
 # Outputs: a failed hook's captured output on stdout, which the wrapper has
@@ -1373,7 +1373,7 @@ _mcp_run_tool() {
         # since the snapshot's own `set` and `shopt` calls would otherwise
         # resolve to the hook's functions. The tool call at the end is
         # deliberately not bypassed: a function the hook defines reaches the
-        # tool. README.md §Running a step before every tool.
+        # tool. docs/server-contract.md §Running a step before every tool.
         # Restored before anything else runs, so an errexit or nounset the hook
         # turned on governs neither the steps below nor the tool.
         builtin eval "builtin ${saved_set//$'\n'/$'\n'builtin }"
@@ -1915,8 +1915,8 @@ run_mcp_server() {
     # Known and accepted limitation, at the point it bites: a signal to this
     # shell's pid alone while a dispatch runs takes effect only when that
     # dispatch returns, so the in-flight call finishes first and the teardown
-    # then finds the tool already reaped. README.md §Cancelling and shutting
-    # down.
+    # then finds the tool already reaped. docs/server-contract.md §Cancelling
+    # and shutting down.
     # The EXIT handler a caller installed before this call is kept rather than
     # dropped: the trap below replaces it, and the teardown runs it afterwards.
     # Captured only in the shell the caller's trap was installed in — a caller
