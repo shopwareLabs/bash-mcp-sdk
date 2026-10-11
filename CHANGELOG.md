@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [5.2.1] - 2026-10-11
+
 ### Fixed
 
 - A tool result, the tools list and the server configuration larger than the OS command-line argument limit no longer leave the request unanswered or end the server, and `arguments` that large, or a tool whose `inputSchema` is that large, are no longer rejected as not evaluable against the tool's schema. That data now reaches `jq` on stdin. `create_response` and `create_error_response` exit 5 instead of 2 when `result`, or a non-empty `data`, is not exactly one JSON document.
@@ -106,7 +108,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - BATS suites covering the validator, the logging surface, and the guarantee that the file sources nothing and serves the protocol on its own.
 - ShellCheck and BATS in CI.
 
-[Unreleased]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.2.0...HEAD
+[Unreleased]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.2.1...HEAD
+[5.2.1]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.2.0...v5.2.1
 [5.2.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.1.0...v5.2.0
 [5.1.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v4.0.0...v5.0.0
