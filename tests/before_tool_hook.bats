@@ -24,7 +24,9 @@
 #     validation — does not run the hook, and neither does an executable on
 #     PATH of that name when no function is defined;
 #   - a nested handle_tools_call inside a tool runs the hook again;
-#   - a cancellation stops a hook that blocks.
+#   - a cancellation stops a hook that blocks;
+#   - with a hook defined, a tool's background child stays in the call's
+#     process group and is killed when the call ends.
 # Each "did not run" claim is proved by the marker file the hook or the tool
 # would have written. Requests are driven through process_request; the
 # cancellation case drives a throwaway server over the FIFO client harness.
@@ -490,6 +492,34 @@ BODY
     assert_success
     _assert_result_text "${output}" false "tool output"
     assert [ -e "${tool_marker}" ]
+}
+
+@test "process_request: with a hook defined, a tool's background child stays in the call's process group and is killed when the call ends" {
+    local long_pid_file="${BATS_TEST_TMPDIR}/long.pid"
+    mcp_before_tool_call() { return 0; }
+    tool_x() {
+        sleep 30 &
+        printf '%s' "$!" > "${long_pid_file}"
+        sleep 0.2 &
+        wait "$!"
+        printf 'long=%s\n' "$(<"${long_pid_file}")"
+    }
+
+    run --separate-stderr process_request "$(_call_request x '{}')"
+
+    assert_success
+    local text
+    text="$(jq -r '.result.content[0].text' <<< "${output}")"
+    local long_pid
+    long_pid="$(<"${long_pid_file}")"
+    local deadline=$(( SECONDS + 3 ))
+    while (( SECONDS < deadline )) && kill -0 "${long_pid}" 2>/dev/null; do
+        sleep 0.1
+    done
+    run kill -0 "${long_pid}"
+    kill "${long_pid}" 2>/dev/null || true
+    assert_failure
+    assert_equal "${text}" "long=${long_pid}"
 }
 
 @test "process_request: a hook killed by a signal answers isError naming the signal and the tool does not run" {

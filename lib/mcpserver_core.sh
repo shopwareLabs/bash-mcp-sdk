@@ -736,12 +736,18 @@ _mcp_validate_against_schema() {
     return 0
 }
 
-# Clear what a tool body must not inherit from the dispatch that runs it: a
-# nested dispatch that kept the server-loop state would stop the server as soon
-# as the outer call returned. docs/architecture.md §Tool containment.
+# Clear what a tool body must not inherit from the dispatch that runs it: the
+# monitor flag, which would let the tool's children leave the call's process
+# group, and the server-loop state, which a nested dispatch would act on to
+# stop the server as soon as the outer call returned.
+# docs/architecture.md §Tool containment.
 # A nested dispatch needing cancellation or deferred replay of its own is out of
 # scope; this restores the plain-call shape a direct caller gets.
 _reset_tool_dispatch_state() {
+    # The wrapper inherits the monitor flag from the `set -m` in
+    # handle_tools_call, and the hook's option restore would otherwise turn job
+    # control on, which moves the tool's children out of the call's process group.
+    set +m
     _MCP_IN_SERVER_LOOP=0
     unset _MCP_SHUTDOWN_FLAG_FILE _MCP_INFLIGHT_FILE _MCP_PARTIAL_FILE
 }
@@ -825,9 +831,7 @@ handle_tools_call() {
     fi
 
     # The tool runs in the background under `set -m` so an in-flight call can be
-    # cancelled by process group. Job-control notices exist only for interactive
-    # shells, so the `set -m` here adds nothing to stderr.
-    # docs/architecture.md §Tool containment.
+    # cancelled by process group. docs/architecture.md §Tool containment.
     # Every file of the call lives in one root that `mktemp -d` creates mode 700
     # and exclusively, so no other user can place anything at a name inside it
     # and the files below are written with a plain `>`.
