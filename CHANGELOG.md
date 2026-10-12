@@ -15,6 +15,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- With `mcp_before_tool_call` defined, external commands a tool started left the call's process group. Cancellation, the end of the call and server shutdown did not stop them, and job-status lines such as `[1]+  Done  sleep 0.3` appeared in the tool result. The shell that runs the hook and the tool now turns `monitor` off before the hook runs, so restoring the shell options after the hook no longer turns job control on. A tool now sees the `monitor` option off, with or without a hook.
 - `enum` no longer accepts an array value made of allowed members. `{"a": ["x", "y"]}` against `"enum": ["x", "y"]` is rejected, as is an array element equal to the members of an `items.enum`.
 - Output a server script writes to stdout after sourcing the core, such as an `echo` during startup, no longer reaches the JSON-RPC stream ahead of the first response. Sourcing the core keeps a private copy of stdout for responses and points fd 1 at stderr. A server that prints a response itself, such as the result of `create_response` or `create_error_response`, now writes it to stderr, and the client does not receive it.
 

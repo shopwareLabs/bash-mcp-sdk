@@ -63,9 +63,10 @@ Tool output that is not valid UTF-8 comes back with replacement characters, and 
 > [!IMPORTANT]
 > Stdout is the protocol channel. Sourcing the core keeps a private copy of the server's stdout, which `run_mcp_server` writes each response to, and points fd 1 at stderr. Output the server script writes to fd 1 after the `source` line goes to stderr. Output written before the `source` line still reaches the stream and corrupts it. A tool function's stdout becomes the tool result, so everything else a server wants to say goes through `log`. A server that prints a response itself, such as the result of `create_response` or `create_error_response`, no longer reaches the client: the line goes to stderr.
 
-Three properties of tool dispatch to write against:
+Four properties of tool dispatch to write against:
 
 - A tool function always runs with errexit disabled, on every dispatch path. That holds under `run_mcp_server` and from a direct call to `process_request` or `handle_tools_call` alike. A failing step does not end the tool. Check each step's status yourself and return non-zero to produce the `isError` result.
+- A tool function runs with job control (`monitor`) off, so the commands it starts stay in the call's process group. Do not turn it on: under `set -m` each job gets a process group of its own, which cancellation and the end of the call do not reach.
 - A tool function's stdin is `/dev/null`. A read returns EOF instead of blocking on the server's protocol stream or consuming bytes meant for it.
 - A tool function may install a `trap … EXIT`. It runs when the tool returns, before the result is built, so anything it prints joins the tool result. It also runs when the `SIGTERM` step of a cancellation or a server shutdown ends the tool. It does not run when the call's process group is killed with `SIGKILL`, which is what a tool that ignores `SIGTERM` gets after the grace. A file that must not outlive the call belongs in `MCP_CALL_TMPDIR` (*Per-call files* below).
 
@@ -98,7 +99,7 @@ A hook that returns 0 lets the tool run, and its stdout and stderr are discarded
 
 Write the hook with `return`, not `exit`. An `exit` ends the call's shell instead of returning to it, so the tool does not run whatever status the hook exits with. The call returns an `isError` result that names the hook, followed — when the hook printed anything — by what it printed. `exit 0` gets that result too, rather than an empty success. A hook killed by a signal also stops the call, and the result names the signal. Both cases are logged at `ERROR`.
 
-The hook runs under the same dispatch properties as a tool function: errexit off, stdin `/dev/null`, and inside the call's process group, so a cancellation stops a hook that blocks. A nested `handle_tools_call` or `process_request` made from inside a tool runs the hook again for the inner call.
+The hook runs under the same dispatch properties as a tool function: errexit off, job control (`monitor`) off, stdin `/dev/null`, and inside the call's process group, so a cancellation stops a hook that blocks. A nested `handle_tools_call` or `process_request` made from inside a tool runs the hook again for the inner call.
 
 ## Per-call files
 
