@@ -38,7 +38,7 @@ There is no install step. Copy `lib/mcpserver_core.sh` into your project and `so
 | `handle_initialize`       | The `initialize` handler `process_request` routes to. Answers `protocolVersion`, `serverInfo` and `capabilities`. |
 | `handle_tools_list`       | The `tools/list` handler `process_request` routes to. Answers the `tools` array. |
 | `handle_tools_call`       | The `tools/call` handler `process_request` routes to. A consumer can drive it directly to dispatch one call without the read loop. |
-| `validate_tool_arguments` | Check a call's arguments against the tool's `inputSchema`. Rejects a tool that the tools list does not declare exactly once with a non-null `inputSchema`. |
+| `validate_tool_arguments` | Check a call's arguments against the tool's `inputSchema`. Rejects a tool that the tools list does not declare exactly once with a non-null `inputSchema`, or whose `inputSchema` uses a keyword the validator does not enforce. |
 | `create_response`         | Build a JSON-RPC result envelope.                                     |
 | `create_error_response`   | Build a JSON-RPC error envelope. Optional 4th arg `data` (JSON value) is included when non-empty. |
 | `log`                     | Append to `MCP_LOG_FILE`, and to `MCP_EXTRA_LOG_FILE` when set.       |

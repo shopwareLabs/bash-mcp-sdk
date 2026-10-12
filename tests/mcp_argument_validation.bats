@@ -6,9 +6,12 @@
 # a declared `type` — one name or a list of alternatives — a declared
 # `pattern` (string values), `minimum`/`maximum`/`exclusiveMinimum`/
 # `exclusiveMaximum` (number values), a declared array `items.type`/
-# `items.enum` (each element), and `enum` on any property present in the
-# call's arguments. Diagnostic precedence is
-# missing > unknown > type > pattern > range > items > enum.
+# `items.enum` (each element), `enum` on any property present in the
+# call's arguments, and `oneOf`. The same keywords are enforced inside nested
+# schemas: a property's own schema, a schema-valued `additionalProperties`,
+# `items` and each `oneOf` branch. A schema using any other keyword, annotations
+# aside, is refused. Diagnostic precedence is
+# missing > unknown > type > pattern > range > items > enum > oneOf.
 # Sources lib/mcpserver_core.sh directly. Consumers vendor that file verbatim, so
 # this suite covers the validator wherever it is vendored.
 bats_require_minimum_version 1.11.0
@@ -41,6 +44,18 @@ setup() {
     #            enum precedence
     #   badrange — bounds that declare nothing enforceable: a non-number
     #            bound, and the draft-04 boolean `exclusiveMinimum` modifier
+    #   options — the reported `options` schema: a schema-valued
+    #            additionalProperties whose values must match one of three
+    #            oneOf branches
+    #   nested — o (object with its own required, enum, integer type and
+    #            additionalProperties:false), codes (items carrying a
+    #            pattern), name (top-level pattern, for precedence)
+    #   extra  — a top-level schema-valued additionalProperties
+    #   choice — v (oneOf whose integer and number branches overlap)
+    #   annotated — annotation keywords at the root and on a property
+    #   short  — a property using minLength, which is not enforced
+    #   anyof  — an anyOf nested in a property's oneOf branch
+    #   rootone — a oneOf at the root schema: exactly one of a and b is required
     cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
 {
   "tools": [
@@ -124,6 +139,100 @@ setup() {
           "stringbound": {"minimum": "3"},
           "draft04": {"minimum": 0, "exclusiveMinimum": true}
         }
+      }
+    },
+    {
+      "name": "options",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "options": {
+            "type": "object",
+            "additionalProperties": {
+              "oneOf": [
+                {"type": "boolean"},
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}}
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "nested",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "o": {
+            "type": "object",
+            "required": ["k"],
+            "properties": {
+              "k": {"type": "string", "enum": ["x", "y"]},
+              "n": {"type": "integer"}
+            },
+            "additionalProperties": false
+          },
+          "codes": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z]{3}$"}},
+          "name": {"type": "string", "pattern": "^[a-z]+$"}
+        }
+      }
+    },
+    {
+      "name": "extra",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+      }
+    },
+    {
+      "name": "choice",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "v": {"oneOf": [{"type": "integer"}, {"type": "number"}]}
+        }
+      }
+    },
+    {
+      "name": "annotated",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Annotated",
+        "description": "A schema carrying annotation keywords.",
+        "type": "object",
+        "properties": {
+          "when": {"type": "string", "format": "date", "description": "A day.", "default": "2020-01-01"}
+        }
+      }
+    },
+    {
+      "name": "short",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "s": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    {
+      "name": "anyof",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "o": {"oneOf": [{"type": "string"}, {"anyOf": [{"type": "integer"}]}]}
+        }
+      }
+    },
+    {
+      "name": "rootone",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "a": {"type": "string"},
+          "b": {"type": "string"}
+        },
+        "oneOf": [{"required": ["a"]}, {"required": ["b"]}]
       }
     }
   ]
@@ -350,6 +459,50 @@ JSON
     assert_failure
     assert_output --partial "Invalid array item(s):"
     assert_output --partial 'values[1]="purple" (allowed: red, green, blue)'
+}
+
+# Regression: membership was tested with jq `index`, which on an array value
+# is a subsequence search, so an array made of allowed members was accepted.
+@test "validate_tool_arguments: an array value made of enum members is rejected by a property enum" {
+    cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
+{
+  "tools": [
+    {
+      "name": "picks",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "a": {"enum": ["x", "y"]}
+        }
+      }
+    }
+  ]
+}
+JSON
+    run validate_tool_arguments "picks" '{"a": ["x", "y"]}'
+    assert_failure 1
+    assert_output 'Invalid value(s): a="["x","y"]" (allowed: x, y).'
+}
+
+@test "validate_tool_arguments: an array element equal to the item enum's members is rejected" {
+    cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
+{
+  "tools": [
+    {
+      "name": "nested",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "values": {"type": "array", "items": {"enum": ["a", "b"]}}
+        }
+      }
+    }
+  ]
+}
+JSON
+    run validate_tool_arguments "nested" '{"values": [["a", "b"]]}'
+    assert_failure 1
+    assert_output 'Invalid array item(s): values[0]=["a","b"] (allowed: a, b).'
 }
 
 @test "validate_tool_arguments: type precedence — a type violation is reported before an unrelated pattern violation" {
@@ -787,9 +940,159 @@ JSON
     assert_output ""
 }
 
+# --- validate_tool_arguments: nested schemas and oneOf ---
+
+# Pre-change, the validator did not descend into an object-valued property,
+# ignored a schema-valued additionalProperties, a pattern inside items and
+# oneOf, so each rejection case below, except the precedence test, was
+# accepted.
+
+@test "validate_tool_arguments: an options value matching a oneOf branch passes" {
+    run validate_tool_arguments "options" '{"options": {"limit": "5", "verbose": true, "tags": ["a"]}}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a number options value matches no oneOf branch and is rejected" {
+    run validate_tool_arguments "options" '{"options": {"limit": 5}}'
+    assert_failure 1
+    assert_output "Invalid value(s): options.limit=5 matches no oneOf alternative."
+}
+
+@test "validate_tool_arguments: an object options value matches no oneOf branch and is rejected" {
+    run validate_tool_arguments "options" '{"options": {"limit": {"x": 1}}}'
+    assert_failure 1
+    assert_output 'Invalid value(s): options.limit={"x":1} matches no oneOf alternative.'
+}
+
+@test "validate_tool_arguments: a null options value matches no oneOf branch and is rejected" {
+    run validate_tool_arguments "options" '{"options": {"limit": null}}'
+    assert_failure 1
+    assert_output "Invalid value(s): options.limit=null matches no oneOf alternative."
+}
+
+@test "validate_tool_arguments: an options array with non-string items matches no oneOf branch and is rejected" {
+    run validate_tool_arguments "options" '{"options": {"a": [1, 2]}}'
+    assert_failure 1
+    assert_output "Invalid value(s): options.a=[1,2] matches no oneOf alternative."
+}
+
+@test "validate_tool_arguments: a value matching two overlapping oneOf branches is rejected" {
+    run validate_tool_arguments "choice" '{"v": 5}'
+    assert_failure 1
+    assert_output "Invalid value(s): v=5 matches 2 oneOf alternatives."
+}
+
+@test "validate_tool_arguments: a value matching no oneOf branch is rejected" {
+    run validate_tool_arguments "choice" '{"v": "s"}'
+    assert_failure 1
+    assert_output 'Invalid value(s): v="s" matches no oneOf alternative.'
+}
+
+@test "validate_tool_arguments: a value matching exactly one oneOf branch passes" {
+    run validate_tool_arguments "choice" '{"v": 1.5}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a nested required property that is absent is rejected with its path" {
+    run validate_tool_arguments "nested" '{"o": {}}'
+    assert_failure 1
+    assert_output "Missing required parameter(s): o.k."
+}
+
+@test "validate_tool_arguments: a nested property of the wrong type is rejected with its path" {
+    run validate_tool_arguments "nested" '{"o": {"k": "x", "n": "1"}}'
+    assert_failure 1
+    assert_output 'Invalid type(s): o.n expected integer, got string ("1").'
+}
+
+@test "validate_tool_arguments: a nested property outside its enum is rejected with its path" {
+    run validate_tool_arguments "nested" '{"o": {"k": "z"}}'
+    assert_failure 1
+    assert_output 'Invalid value(s): o.k="z" (allowed: x, y).'
+}
+
+@test "validate_tool_arguments: an undeclared nested property under additionalProperties false is rejected" {
+    run validate_tool_arguments "nested" '{"o": {"k": "x", "q": 1}}'
+    assert_failure 1
+    assert_output "Unknown parameter(s): o.q. Allowed parameters: o.k, o.n."
+}
+
+@test "validate_tool_arguments: valid nested arguments pass" {
+    run validate_tool_arguments "nested" '{"o": {"k": "y", "n": 3}, "codes": ["ABC"], "name": "abc"}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an array element violating an items pattern is rejected with its index" {
+    run validate_tool_arguments "nested" '{"codes": ["ABC", "abc"]}'
+    assert_failure 1
+    assert_output 'Invalid value(s): codes[1]="abc" does not match pattern ^[A-Z]{3}$.'
+}
+
+@test "validate_tool_arguments: a top-level schema-valued additionalProperties checks each undeclared value" {
+    run validate_tool_arguments "extra" '{"x": 5}'
+    assert_failure 1
+    assert_output "Invalid type(s): x expected string, got number (5)."
+}
+
+@test "validate_tool_arguments: precedence — a nested type violation is reported before a top-level pattern violation" {
+    run validate_tool_arguments "nested" '{"name": "ABC", "o": {"k": "x", "n": "1"}}'
+    assert_failure 1
+    assert_output 'Invalid type(s): o.n expected integer, got string ("1").'
+}
+
+# --- validate_tool_arguments: keywords the validator does not enforce ---
+
+# A keyword the validator does not read would otherwise be waved through. Each
+# refusal below was accepted pre-change.
+
+@test "validate_tool_arguments: a schema using minLength is refused naming the keyword's path" {
+    run validate_tool_arguments "short" '{"s": "abc"}'
+    assert_failure 1
+    assert_output "Cannot validate arguments for short: its inputSchema uses keyword(s) this validator does not enforce: properties.s.minLength."
+}
+
+@test "validate_tool_arguments: an anyOf nested in a property's oneOf branch is refused naming its path" {
+    run validate_tool_arguments "anyof" '{"o": "a"}'
+    assert_failure 1
+    assert_output "Cannot validate arguments for anyof: its inputSchema uses keyword(s) this validator does not enforce: properties.o.oneOf[1].anyOf."
+}
+
+@test "validate_tool_arguments: a oneOf at the root passes when exactly one branch matches" {
+    run validate_tool_arguments "rootone" '{"a": "x"}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a oneOf at the root matching no branch names the root as arguments" {
+    run validate_tool_arguments "rootone" '{}'
+    assert_failure 1
+    assert_output "Invalid value(s): arguments={} matches no oneOf alternative."
+}
+
+@test "validate_tool_arguments: a oneOf at the root matching two branches names the root as arguments" {
+    run validate_tool_arguments "rootone" '{"a": "x", "b": "y"}'
+    assert_failure 1
+    assert_output 'Invalid value(s): arguments={"a":"x","b":"y"} matches 2 oneOf alternatives.'
+}
+
+@test "validate_tool_arguments: annotation keywords do not stop a valid call" {
+    run validate_tool_arguments "annotated" '{"when": "2021-02-03"}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: annotation keywords do not stop the type check" {
+    run validate_tool_arguments "annotated" '{"when": 5}'
+    assert_failure 1
+    assert_output "Invalid type(s): when expected string, got number (5)."
+}
+
 # --- validate_tool_arguments: arguments that are not a JSON object ---
 
-# Every schema constraint reads `$args | keys`, which errors on a non-object.
+# The validator rejects a non-object before it checks any argument.
 # Each of these once passed validation, taking `required`,
 # `additionalProperties` and `enum` down with it.
 _assert_rejects_non_object() {
@@ -900,6 +1203,18 @@ _assert_rejects_non_object() {
     assert_output --partial '"isError":true'
     assert_output --partial "limit=999 above maximum 50"
     refute_output --partial "DISPATCHED"
+}
+
+@test "handle_tools_call: a schema using an unenforced keyword returns an isError result, not a dispatch" {
+    tool_short() { touch "${BATS_TEST_TMPDIR}/tool_short_ran"; }
+    local params
+    params=$(jq -n -c '{name: "short", arguments: {s: "abc"}}')
+    run handle_tools_call 1 "$params"
+    assert_success
+    assert_equal "$(printf '%s' "$output" | jq -r '.result.isError')" "true"
+    assert_equal "$(printf '%s' "$output" | jq -r '.result.content[0].text')" \
+        "Cannot validate arguments for short: its inputSchema uses keyword(s) this validator does not enforce: properties.s.minLength."
+    [[ ! -e "${BATS_TEST_TMPDIR}/tool_short_ran" ]]
 }
 
 @test "handle_tools_call: valid arguments are dispatched to the tool" {
