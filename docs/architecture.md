@@ -8,7 +8,7 @@ This document owns the cross-function runtime design of `lib/mcpserver_core.sh`.
 
 `run_mcp_server` owns the client's stdin. Each iteration reads one line, runs `process_request` in a command substitution, and prints a non-empty result. That substitution is a subshell, so no variable a dispatch sets reaches the loop. State that has to cross the boundary travels through files.
 
-`process_request` closes its inherited lifeline descriptor first (§The lifeline). Four gates then run in a fixed order, ahead of any dispatch.
+`process_request` closes its inherited lifeline descriptor first (§The lifeline). Five gates then run in a fixed order, ahead of any dispatch.
 
 | Gate | What it tests | Answer when it fails |
 |---|---|---|
@@ -16,6 +16,7 @@ This document owns the cross-function runtime design of `lib/mcpserver_core.sh`.
 | Object | the document's `type` is `object` | `-32600 Invalid Request`, null id |
 | Version | `.jsonrpc` equals `2.0` | `-32600`, reflecting a valid id and null otherwise |
 | Id type | the id is a JSON string or an integer | `-32600`, null id |
+| Method | `.method` is a JSON string | `-32600 Invalid Request: method must be a string`, reflecting the id |
 
 The parse gate refuses two different lines. A line jq cannot read fails the substitution. A line holding more than one document yields a count other than `1`. Each answers `-32700` with its own message.
 
@@ -25,15 +26,15 @@ The id-type gate accepts a JSON string, and a number that is whole in two readin
 
 `_mcp_validate_against_schema`, the validator behind `validate_tool_arguments` and `handle_tools_call`, holds the same test for a declared `integer`. One gap survives both copies: a rendering that keeps an exponent falls back to the double-based verdict, so `1.5e-400` reads as an integer.
 
-The notification arm sits between the version gate and the id-type gate. An empty id means the key was absent, so the message is a notification and none of the arms emits a response.
+The notification arm sits between the version gate and the id-type gate. An empty id means the key was absent, so the message is a notification and none of the arms emits a response. A notification whose method is not a string is logged and dropped, because the method gate answers requests only.
 
 A `notifications/cancelled` that arrives here matches no call, because nothing is in flight between requests. `process_request` logs it and drops it. The cancellation that reaches a running call is read elsewhere (§Cancellation).
 
-A valid id then routes by method. `initialize`, `tools/list` and `tools/call` go to their handlers, `ping` answers an empty result object, and any other method answers `-32601`.
+The method gate runs after the id-type gate, so the id it echoes is always valid. `process_request` reads `params` with `has("params")`, so only an absent `params` defaults to `{}`. A string method then routes: `initialize`, `tools/list` and `tools/call` go to their handlers, `ping` answers an empty result object, and any other method answers `-32601`.
 
 ## Tool containment
 
-`handle_tools_call` gates its `params` to an object before it reads `.name` and `.arguments`, so neither extraction can fail on a non-object. A tool name that does not match `^[a-zA-Z_][a-zA-Z0-9_]*$` answers `-32602`. `.arguments` is read with `has("arguments")`, so a present `null` or `false` reaches the validator instead of defaulting to `{}`.
+`handle_tools_call` gates its `params` to an object before it reads `.name` and `.arguments`, so neither extraction can fail on a non-object. A `name` that is absent or not a string answers `-32602 Invalid params: name must be a string` before the name is printed, because `jq -r` prints `null`, `false` and `true` as words the identifier pattern accepts. A tool name that does not match `^[a-zA-Z_][a-zA-Z0-9_]*$` answers `-32602`. `.arguments` is read with `has("arguments")`, so a present `null` or `false` reaches the validator instead of defaulting to `{}`.
 
 `_mcp_tool_schema` then looks the name up in the tools list with `.tools[]?`. It reads the list once and returns the entry's schema, and the validator checks the arguments against that schema, so the declaration check and the validation never disagree about what the list holds.
 
@@ -45,7 +46,7 @@ A valid id then routes by method. `initialize`, `tools/list` and `tools/call` go
 | The one entry has no `inputSchema`, or a `null` one | `isError` result |
 | One entry with a schema | continue |
 
-A declared name with no `tool_<name>` function answers `-32601`. The test is `declare -F`, which matches shell functions only, so an executable on `PATH` or an alias of that name never answers for a tool. `_mcp_validate_against_schema` then checks the arguments against the schema the lookup returned.
+A declared name with no `tool_<name>` function answers `-32601`. The test is `declare -F`, which matches shell functions only, so an executable on `PATH` or an alias of that name never answers for a tool. `_mcp_validate_against_schema` then checks the arguments against the schema the lookup returned. It refuses a schema that uses a keyword it does not enforce, or one whose keywords have the wrong type, as an `isError` result naming the offending paths. `check` runs only on a schema that passed both, so a `//` default there meets an absent keyword and never a wrong-typed one.
 
 The tool then runs in the background under `set -m`, which gives the job its own process group. `handle_tools_call` saves the shell's `monitor` setting and restores it after the spawn. The job is a wrapper subshell rather than the tool itself. That lets a second process sit in the tool's group and outlive the tool without outliving the group.
 

@@ -30,6 +30,10 @@ A message whose `id` is present but is not a string or an integer is neither a r
 
 A request must be a single JSON object on a line of its own. A line that holds more than one JSON document, or that is not parseable JSON, is answered `-32700 Parse error` and not dispatched. A document that is valid JSON but not an object is answered `-32600` with a null `id`. That covers `[1,2]`, `"x"`, `5`, `true`, `false` and `null`.
 
+A request whose `method` is absent or is not a string is answered `-32600 Invalid Request: method must be a string`, echoing its `id`. A request whose `id` is also invalid gets the `id` answer above instead. A notification whose `method` is absent or not a string gets no response; the server logs it and drops it.
+
+Only an absent `params` is read as `{}`. A present `params` reaches the method's handler as sent, so a `tools/call` whose `params` is `null`, `false` or any other non-object is answered `-32602 Invalid params: expected an object`. A `tools/call` whose `name` is absent or is not a string is answered `-32602 Invalid params: name must be a string`. A string `name` that is not an identifier is answered `-32602 Invalid tool name: <name>`.
+
 ## Tool functions
 
 `tools.json` decides which tools exist. A `tools/call` runs `tool_<name>` only when the list declares `<name>` and a shell function of that name is defined. A name the list does not declare answers `-32601`, even when a `tool_<name>` function is sourced. A declared name with no such function answers `-32601` too. An executable, alias or builtin named `tool_<name>` is never dispatched.
@@ -42,6 +46,10 @@ The hook is resolved by name, and only a shell function counts. A hook is not a 
 
 Every `inputSchema` in `tools.json` is enforced before the tool function runs. The keywords are `required`, `properties`, `additionalProperties`, `type`, `pattern`, `minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum`, `items`, `enum`, and `oneOf`.
 
+Each of these keywords must hold a value of its own type. `type` is a string or a non-empty array of strings. The four bounds are numbers. `pattern` is a string that compiles as a regular expression. `required` is an array of strings. `enum` is an array. `properties` is an object whose values are objects. `items` is an object. `additionalProperties` is a boolean or an object. `oneOf` is an array of objects. The `inputSchema` itself is an object. A present `null` counts as the wrong type, and so does `false` for every keyword except `additionalProperties`. A schema holding a keyword of the wrong type is not dispatched: the call returns an `isError` result, `Cannot validate arguments for <tool>: its inputSchema keyword(s) have the wrong type: <path> must be <shape>.`, naming each wrong-typed keyword the check reaches, for example `properties.x.required must be an array of strings`.
+
+The check tests each keyword's JSON type, and that a `pattern` compiles, not whether any value can satisfy the schema. A `type` that names no JSON Schema type, such as `"int"`, an empty `enum` and an empty `oneOf` pass it. The validator then rejects every value given at that position as an argument error. A call that omits an optional property of that kind still runs the tool.
+
 These keywords apply inside nested schemas too: a property's own schema, a schema given as `additionalProperties`, `items`, and each `oneOf` branch. `additionalProperties: false` rejects undeclared properties. A schema there checks each undeclared property's value. A nested defect names its path, such as `options.limit` or `tags[1]`.
 
 A value satisfies `oneOf` when it passes exactly one branch. Matching no branch, or more than one, is a defect. Keywords next to `oneOf` are still checked.
@@ -50,7 +58,7 @@ The annotation keywords `title`, `description`, `default`, `examples`, `format`,
 
 A `type` — on a property or on `items` — may be one name or a list of alternatives (e.g. `"type": ["integer", "string"]`). A value satisfies it by matching any member.
 
-A range bound applies only to a number-valued argument. A string, boolean, or other non-number carries no bound. A bound that is not itself a number is left unenforced, which also covers the JSON Schema draft-04 boolean form `"exclusiveMinimum": true`.
+A range bound applies only to a number-valued argument. A string, boolean, or other non-number carries no bound. Only the numeric form of `exclusiveMinimum` and `exclusiveMaximum` is enforced. The JSON Schema draft-04 boolean form `"exclusiveMinimum": true` is a keyword of the wrong type.
 
 Diagnostics report one class of defect, the first in this order that occurs anywhere in the arguments: missing parameter, unknown parameter, type, pattern, range, array item type or enum, enum, `oneOf`. Every defect of that class is listed.
 

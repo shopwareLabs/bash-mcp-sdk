@@ -437,9 +437,9 @@ _mcp_tool_schema() {
 }
 
 # Validate call arguments against the tool's declared inputSchema, rejecting
-# arguments that are not a JSON object. The enforced keywords, the union-type
-# rule, the range-bound rule and the diagnostic precedence order are
-# docs/server-contract.md §Tool functions.
+# arguments that are not a JSON object. The enforced keywords, their accepted
+# value types, the union-type rule, the range-bound rule and the diagnostic
+# precedence order are docs/server-contract.md §Tool functions.
 # The schema comes from _mcp_tool_schema, so a tool the tools list does not
 # declare exactly once with a non-null inputSchema is rejected rather than
 # skipped, and so is a tools list that cannot be read, whether it is missing,
@@ -558,17 +558,14 @@ _mcp_validate_against_schema() {
         # each tagged with its diagnostic class in `.c`. Every schema position
         # (the root, a `properties` value, a schema-valued
         # `additionalProperties`, `items`, a `oneOf` branch) is checked by this
-        # one function. Each keyword is its own comma-separated group, so a
-        # `// empty` yielding zero outputs for an absent keyword drops that
-        # keyword alone. $item marks an array element, whose own `type` and
-        # `enum` defects keep the `items` class and its formats.
+        # one function. `shape` has already refused every wrong-typed keyword,
+        # so a `// empty` or `//` default here sees an absent keyword only. A
+        # keyword read with `// empty` sits in its own comma-separated branch,
+        # so an absent one drops that keyword alone. $item marks an array element,
+        # whose own `type` and `enum` defects keep the `items` class and its
+        # formats.
         def check($s; $v; $path; $item):
             [ ($s.type // empty) as $t
-              | (type_names($t)) as $tn
-              # A malformed `type` — an empty list, or one carrying a
-              # non-string member — is left unenforced rather than rejecting
-              # every value.
-              | select(($tn | length) > 0 and all($tn[]; type == "string"))
               | select((type_ok($t; $v)) | not)
               | {c: (if $item then "items" else "type" end), issue: "type", p: $path,
                  expected: type_expected($t), actual: type_label($t; $v), v: $v}
@@ -584,31 +581,21 @@ _mcp_validate_against_schema() {
               # strings. jq types `true` as "boolean", so a boolean is skipped
               # here too and never coerced to 1 or 0.
               ( select(($v | type) == "number")
-                # A malformed or absent bound is left unenforced, mirroring the
-                # malformed-`type` policy above: `select(type == "number")`
-                # yields zero outputs for an absent or non-number bound. That
-                # also leaves the JSON Schema draft-04 boolean form
-                # `"exclusiveMinimum": true` unenforced — its modifier semantics
-                # are not implemented here.
-                | ( ($s.minimum          | select(type == "number") | {rel: "below minimum",              bound: ., ok: ($v >= .)}),
-                    ($s.maximum          | select(type == "number") | {rel: "above maximum",              bound: ., ok: ($v <= .)}),
-                    ($s.exclusiveMinimum | select(type == "number") | {rel: "not above exclusiveMinimum", bound: ., ok: ($v >  .)}),
-                    ($s.exclusiveMaximum | select(type == "number") | {rel: "not below exclusiveMaximum", bound: ., ok: ($v <  .)}) )
+                | ( ($s.minimum          // empty | {rel: "below minimum",              bound: ., ok: ($v >= .)}),
+                    ($s.maximum          // empty | {rel: "above maximum",              bound: ., ok: ($v <= .)}),
+                    ($s.exclusiveMinimum // empty | {rel: "not above exclusiveMinimum", bound: ., ok: ($v >  .)}),
+                    ($s.exclusiveMaximum // empty | {rel: "not below exclusiveMaximum", bound: ., ok: ($v <  .)}) )
                 | select(.ok | not)
                 | {c: "range", p: $path, rel: .rel, bound: .bound, v: $v} ),
               # An element reports an `enum` defect only when its `type` held.
-              # A string `enum` fails the evaluation on both paths; `false`
-              # fails it on an element only.
-              ( if $item then
-                  select(($type_violations | length) == 0)
-                  | ($s.enum) as $e
-                  | select($e != null and ($e | any(.[]; . == $v) | not))
-                  | {c: "items", issue: "enum", p: $path, enum: $e, v: $v}
-                else
-                  ($s.enum // empty) as $e
-                  | select($e | any(.[]; . == $v) | not)
-                  | {c: "enum", p: $path, enum: $e, v: $v}
-                end ),
+              ( ($s.enum // empty) as $e
+                | select($e | any(.[]; . == $v) | not)
+                | if $item then
+                    select(($type_violations | length) == 0)
+                    | {c: "items", issue: "enum", p: $path, enum: $e, v: $v}
+                  else
+                    {c: "enum", p: $path, enum: $e, v: $v}
+                  end ),
               ( select(($v | type) == "object")
                 | ($v | keys)                    as $present
                 | ($s.properties // {})          as $props
@@ -642,10 +629,10 @@ _mcp_validate_against_schema() {
                 | {c: "oneOf", p: $path, n: $n, v: $v} );
         # Dotted paths of every schema key outside the keywords `check` enforces
         # and the annotations it ignores, walked over the same positions.
-        # A position holding something other than an object (an `items` array,
-        # say) makes `keys`, the index or the string concatenation fail, and
-        # that jq failure is a rejection.
+        # It descends only into positions of the right type and yields nothing
+        # for any other, so a wrong-typed position is left for `shape` to name.
         def unenforced($s; $path):
+            if ($s | type) != "object" then empty else
             ($s | keys[]) as $k
             | ((if $path == "" then "" else $path + "." end) + $k) as $kp
             | if ($k | IN("type", "properties", "required", "additionalProperties",
@@ -656,23 +643,76 @@ _mcp_validate_against_schema() {
                           "writeOnly") | not) then
                 $kp
               elif $k == "properties" then
+                if ($s.properties | type) != "object" then empty else
                 ($s.properties | keys[]) as $pk
-                | unenforced($s.properties[$pk]; $kp + "." + $pk)
-              elif $k == "additionalProperties" then
-                if $s.additionalProperties == null
-                   or ($s.additionalProperties | type) == "boolean" then empty
-                else unenforced($s.additionalProperties; $kp) end
-              elif $k == "items" then
-                if $s.items == null then empty else unenforced($s.items; $kp) end
+                | unenforced($s.properties[$pk]; $kp + "." + $pk) end
+              elif $k == "additionalProperties" or $k == "items" then
+                unenforced($s[$k]; $kp)
               elif $k == "oneOf" then
+                if ($s.oneOf | type) != "array" then empty else
                 range(0; $s.oneOf | length) as $i
-                | unenforced($s.oneOf[$i]; $kp + "[" + ($i | tostring) + "]")
-              else empty end;
+                | unenforced($s.oneOf[$i]; $kp + "[" + ($i | tostring) + "]") end
+              else empty end
+            end;
+        # One record per keyword whose value has the wrong type, walked over
+        # the same positions in the same key order as `unenforced`, so `check`
+        # only ever reads a keyword of the type it expects. A position of the
+        # wrong type is reported and not descended into.
+        def shape($s; $path):
+            def at($k): (if $path == "" then "" else $path + "." end) + $k;
+            if ($s | type) != "object" then
+              {p: (if $path == "" then "inputSchema" else $path end), want: "an object"}
+            else
+              ($s | keys[]) as $k
+              | $s[$k] as $kv
+              | if $k == "type" then
+                  select(($kv | type) != "string"
+                         and (($kv | type) != "array" or ($kv | length) == 0
+                              or any($kv[]; type != "string")))
+                  | {p: at($k), want: "a string or a non-empty array of strings"}
+                elif ($k | IN("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")) then
+                  select(($kv | type) != "number")
+                  | {p: at($k), want: "a number"}
+                elif $k == "pattern" then
+                  select(($kv | type) != "string"
+                         or (try ("" | test($kv) | false) catch true))
+                  | {p: at($k), want: "a string holding a valid regular expression"}
+                elif $k == "required" then
+                  select(($kv | type) != "array" or any($kv[]; type != "string"))
+                  | {p: at($k), want: "an array of strings"}
+                elif $k == "enum" then
+                  select(($kv | type) != "array")
+                  | {p: at($k), want: "an array"}
+                elif $k == "properties" then
+                  if ($kv | type) != "object" then {p: at($k), want: "an object"}
+                  else ($kv | keys[]) as $pk | shape($kv[$pk]; at($k) + "." + $pk) end
+                elif $k == "items" then
+                  shape($kv; at($k))
+                elif $k == "additionalProperties" then
+                  if ($kv | type) == "boolean" then empty
+                  elif ($kv | type) == "object" then shape($kv; at($k))
+                  else {p: at($k), want: "a boolean or an object"} end
+                elif $k == "oneOf" then
+                  if ($kv | type) != "array" or any($kv[]; type != "object") then
+                    {p: at($k), want: "an array of objects"}
+                  else
+                    range(0; $kv | length) as $i
+                    | shape($kv[$i]; at($k) + "[" + ($i | tostring) + "]")
+                  end
+                else empty end
+            end;
+        # When both walks report, the unenforced-keyword message answers: the
+        # schema needs a validator that enforces it whatever the other keywords hold.
         [ unenforced($schema; "") ] as $unenforced
+        | [ shape($schema; "") ] as $shape
         | if ($unenforced | length) > 0 then
             "Cannot validate arguments for " + $tool
             + ": its inputSchema uses keyword(s) this validator does not enforce: "
             + ($unenforced | join(", ")) + "."
+          elif ($shape | length) > 0 then
+            "Cannot validate arguments for " + $tool
+            + ": its inputSchema keyword(s) have the wrong type: "
+            + ($shape | map(.p + " must be " + .want) | join("; ")) + "."
           elif ($args | type) != "object" then
             "Invalid arguments: expected a JSON object, got "
             + ($args | type) + "."
@@ -708,12 +748,12 @@ _mcp_validate_against_schema() {
                     + ", got " + .actual + " (" + (.v | tojson) + ")"
                   else
                     .p + "=" + (.v | tojson)
-                    + " (allowed: " + (.enum | join(", ")) + ")"
+                    + " (allowed: " + (.enum | map(if type == "string" then . else tojson end) | join(", ")) + ")"
                   end
                 ) | join("; ")) + "."
             elif (of("enum") | length) > 0 then
               "Invalid value(s): " + (of("enum") | map(
-                  (.p | shown) + "=\"" + (.v | tostring) + "\" (allowed: " + (.enum | join(", ")) + ")"
+                  (.p | shown) + "=\"" + (.v | tostring) + "\" (allowed: " + (.enum | map(if type == "string" then . else tojson end) | join(", ")) + ")"
                 ) | join("; ")) + "."
             elif (of("oneOf") | length) > 0 then
               "Invalid value(s): " + (of("oneOf") | map(
@@ -774,8 +814,17 @@ handle_tools_call() {
         return
     fi
 
+    # The type is tested before the name is printed: `jq -r` prints `null`,
+    # `false` and `true` as identifiers the regex below accepts, so a non-string
+    # name would dispatch a tool declared under that word.
+    if [[ "$(printf '%s\n' "$params" | jq -r '.name | type')" != "string" ]]; then
+        log "ERROR" "tools/call name is not a string"
+        create_error_response "$id" -32602 "Invalid params: name must be a string"
+        return
+    fi
+
     local tool_name
-    tool_name=$(echo "$params" | jq -r '.name // ""')
+    tool_name=$(echo "$params" | jq -r '.name')
 
     # `.arguments // {}` would substitute {} for a present `null` or `false`,
     # because jq's `//` treats both as absent — the validator's non-object
@@ -1607,7 +1656,7 @@ process_request() {
         return
     fi
 
-    local jsonrpc id id_is_valid method params
+    local jsonrpc id id_is_valid method method_is_string params
     jsonrpc=$(echo "$request" | jq -r '.jsonrpc // ""')
     # The id is read by key presence, not with `//`: that operator maps an
     # absent key and a present null to the same output, so a request carrying
@@ -1615,8 +1664,16 @@ process_request() {
     # the JSON type of a present id, so 7 stays an integer and "7" a string,
     # and an absent key leaves the empty sentinel the notification gate reads.
     id=$(echo "$request" | jq -r 'if has("id") then (.id | tojson) else "" end')
-    method=$(echo "$request" | jq -r '.method // ""')
-    params=$(echo "$request" | jq -c '.params // {}')
+    # A method is read only when it is a string: `.method // ""` folded a
+    # present `null` or `false` into the empty name, and printed a number or
+    # `true` as a name. The verdict is kept apart from the name, because an
+    # empty string is a string method that no handler answers.
+    method_is_string=$(echo "$request" | jq -r '(.method | type) == "string"')
+    method=$(echo "$request" | jq -r 'if (.method | type) == "string" then .method else "" end')
+    # Only an absent params defaults to {}: `//` would substitute it for a
+    # present `null` or `false`, and handle_tools_call's object gate would
+    # then never see either.
+    params=$(echo "$request" | jq -c 'if has("params") then .params else {} end')
 
     # Whether the id is of a type a response can echo back: a JSON string or
     # integer. JSON-RPC 2.0 §5 allows a response id to be a String, Number or
@@ -1666,6 +1723,10 @@ process_request() {
     # when the key is absent. Between requests nothing is in flight: a
     # cancellation that arrives here matches no call and is dropped.
     if [[ -z "$id" ]]; then
+        if [[ "$method_is_string" != "true" ]]; then
+            log "ERROR" "Notification method is not a string; dropped"
+            return
+        fi
         case "$method" in
             "notifications/initialized")
                 log "INFO" "Client initialized"
@@ -1689,6 +1750,15 @@ process_request() {
     if [[ "$id_is_valid" != "1" ]]; then
         log "ERROR" "Request id must be a string or an integer"
         create_error_response "null" -32600 "Invalid Request: id must be a string or an integer"
+        return
+    fi
+
+    # JSON-RPC 2.0 §4 makes `method` a String, so a request whose method is
+    # anything else, or absent, is an Invalid Request rather than an unknown
+    # method. It runs after the id gate, so the id it echoes is a valid one.
+    if [[ "$method_is_string" != "true" ]]; then
+        log "ERROR" "Request method is not a string"
+        create_error_response "$id" -32600 "Invalid Request: method must be a string"
         return
     fi
 

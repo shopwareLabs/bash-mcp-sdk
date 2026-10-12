@@ -7,11 +7,13 @@
 #     substitutions — a failed extraction cannot end the server;
 #   - jq's raw `Cannot index ...` diagnostics for a non-object params no longer
 #     reach the process's stderr, unrouted through `log`.
+# It also pins the request members read by type rather than with jq's `//`:
+# a present `null` or `false` params, a non-string `name`, and a non-string
+# `method`, each answered rather than read as absent or as a name.
 # Requests are driven through process_request and, for the server-loop cases,
 # through run_mcp_server, so the suite covers the real entry points.
-# Pre-change, `params: 5`, `"x"` and `[1,2]` answered `-32602 Invalid tool name: `
-# and under POSIX mode the server died without answering the request that
-# followed; every case below fails against the pre-change library.
+# Each section states what its cases answered before the change; a case marked
+# as a guard pins behavior the change keeps.
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
@@ -49,6 +51,9 @@ _ping_request() {
 }
 
 # --- process_request: a non-object params answers -32602 ---
+
+# Before the object gate, `params: 5`, `"x"` and `[1,2]` answered
+# `-32602 Invalid tool name: `.
 
 # Answer <request> through process_request and assert the reply is a -32602
 # error envelope carrying the request's id and the params message. The response
@@ -116,4 +121,122 @@ _session_input() {
 
     run printf '%s' "${session_stderr}"
     refute_output --partial "Cannot index"
+}
+
+# --- process_request: a present null or false params is not an absent one ---
+
+# Read as `.params // {}`, a present `null` or `false` became `{}`, passed the
+# object gate and answered `-32602 Invalid tool name: `.
+
+@test "process_request: a null params answers -32602 Invalid params" {
+    _assert_non_object_params_rejected "$(_call_request 'null')"
+}
+
+@test "process_request: a false params answers -32602 Invalid params" {
+    _assert_non_object_params_rejected "$(_call_request 'false')"
+}
+
+# --- process_request: a tools/call name that is not a string answers -32602 ---
+
+# Read as `.name // ""`, `null` and `false` answered `Invalid tool name: `, `5`
+# answered `Invalid tool name: 5`, and `true` printed as `true`, which passes the
+# identifier regex, so a tool declared as `true` ran. A tool named `true` is
+# declared and implemented here so that dispatch would be observable.
+_assert_non_string_name_rejected() {
+    local params_json="$1"
+    local marker="${BATS_TEST_TMPDIR}/true.ran"
+    printf '%s\n' '{"tools": [{"name": "true", "inputSchema": {"type": "object"}}]}' > "${MCP_TOOLS_LIST_FILE}"
+    tool_true() { : > "${marker}"; }
+
+    run --separate-stderr process_request "$(_call_request "${params_json}")"
+
+    assert_success
+    run jq -e '.id == 1 and .error.code == -32602 and .error.message == "Invalid params: name must be a string" and (.result == null)' <<< "${output}"
+    assert_success
+    assert [ ! -e "${marker}" ]
+}
+
+@test "process_request: a null tool name answers -32602 name must be a string" {
+    _assert_non_string_name_rejected '{"name": null, "arguments": {}}'
+}
+
+@test "process_request: a false tool name answers -32602 name must be a string" {
+    _assert_non_string_name_rejected '{"name": false, "arguments": {}}'
+}
+
+@test "process_request: a true tool name answers -32602 and does not run a tool declared as true" {
+    _assert_non_string_name_rejected '{"name": true, "arguments": {}}'
+}
+
+@test "process_request: a numeric tool name answers -32602 name must be a string" {
+    _assert_non_string_name_rejected '{"name": 5, "arguments": {}}'
+}
+
+@test "process_request: an absent tool name answers -32602 name must be a string" {
+    _assert_non_string_name_rejected '{"arguments": {}}'
+}
+
+@test "process_request: the string tool name true is dispatched (guard: unchanged behavior)" {
+    local marker="${BATS_TEST_TMPDIR}/true.ran"
+    printf '%s\n' '{"tools": [{"name": "true", "inputSchema": {"type": "object"}}]}' > "${MCP_TOOLS_LIST_FILE}"
+    tool_true() { : > "${marker}"; printf 'ran true\n'; }
+
+    run --separate-stderr process_request "$(_call_request '{"name": "true", "arguments": {}}')"
+
+    assert_success
+    run jq -e '.id == 1 and .result.isError == false and .result.content[0].text == "ran true"' <<< "${output}"
+    assert_success
+    assert [ -e "${marker}" ]
+}
+
+# --- process_request: a method that is not a string ---
+
+# Read as `.method // ""`, a non-string method answered `-32601 Method not
+# found: ` (or `: 5`). JSON-RPC 2.0 §4 makes `method` a String, and its §7
+# examples answer `"method": 1` with -32600 Invalid Request.
+
+# A request line with id 1 whose `method` member is set from <method-json>, or
+# left out when <method-json> is empty.
+_method_request() {
+    local method_json="$1"
+    if [[ -z "${method_json}" ]]; then
+        jq -nc '{jsonrpc: "2.0", id: 1}'
+    else
+        jq -nc --argjson m "${method_json}" '{jsonrpc: "2.0", id: 1, method: $m}'
+    fi
+}
+
+_assert_non_string_method_rejected() {
+    local request="$1"
+
+    run --separate-stderr process_request "${request}"
+
+    assert_success
+    run jq -e '.jsonrpc == "2.0" and .id == 1 and .error.code == -32600 and .error.message == "Invalid Request: method must be a string" and (.result == null)' <<< "${output}"
+    assert_success
+}
+
+@test "process_request: a null method answers -32600 method must be a string" {
+    _assert_non_string_method_rejected "$(_method_request 'null')"
+}
+
+@test "process_request: a false method answers -32600 method must be a string" {
+    _assert_non_string_method_rejected "$(_method_request 'false')"
+}
+
+@test "process_request: a numeric method answers -32600 method must be a string" {
+    _assert_non_string_method_rejected "$(_method_request '5')"
+}
+
+@test "process_request: an absent method answers -32600 method must be a string" {
+    _assert_non_string_method_rejected "$(_method_request '')"
+}
+
+@test "process_request: a notification with a numeric method gets no response" {
+    run --separate-stderr process_request "$(jq -nc '{jsonrpc: "2.0", method: 5}')"
+
+    assert_success
+    assert_output ""
+    run grep -c "Notification method is not a string; dropped" "${MCP_LOG_FILE}"
+    assert_output "1"
 }
