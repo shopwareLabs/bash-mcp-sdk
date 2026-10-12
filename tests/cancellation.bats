@@ -1471,7 +1471,8 @@ teardown() {
     ' bash "${REPO_ROOT}/lib/mcpserver_core.sh"
 
     assert_success
-    run jq -r '.result.content[0].text' <<< "${output}"
+    # Sourcing the core points fd 1 at stderr, so a direct call's response lands there.
+    run jq -r '.result.content[0].text' <<< "${stderr}"
     assert_success
     [[ "${output}" == *"after failing step"* ]]
 }
