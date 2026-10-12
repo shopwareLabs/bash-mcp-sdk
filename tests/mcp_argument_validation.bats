@@ -10,7 +10,8 @@
 # call's arguments, and `oneOf`. The same keywords are enforced inside nested
 # schemas: a property's own schema, a schema-valued `additionalProperties`,
 # `items` and each `oneOf` branch. A schema using any other keyword, annotations
-# aside, is refused. Diagnostic precedence is
+# aside, is refused, and so is one holding an enforced keyword of the wrong
+# type; the unknown-keyword refusal wins when both apply. Diagnostic precedence is
 # missing > unknown > type > pattern > range > items > enum > oneOf.
 # Sources lib/mcpserver_core.sh directly. Consumers vendor that file verbatim, so
 # this suite covers the validator wherever it is vendored.
@@ -35,14 +36,14 @@ setup() {
     #   union  — list-form `type` coverage: count (integer or string), choice
     #            (single-member list plus an enum, for precedence), values
     #            (array whose items.type is a list)
-    #   malformed — `type` lists that declare nothing enforceable: empty, and
-    #            one carrying a non-string member
+    #   malformed — wrong-typed `type` lists, refused by the shape check: empty,
+    #            and one carrying a non-string member, at a property and in items
     #   ranged — range-keyword coverage: limit (integer, minimum+maximum),
     #            score (number, minimum), above (exclusiveMinimum), below
     #            (exclusiveMaximum), untyped (minimum, no declared type),
     #            plus name/tags/mode to pin range against pattern, items and
     #            enum precedence
-    #   badrange — bounds that declare nothing enforceable: a non-number
+    #   badrange — wrong-typed bounds, refused by the shape check: a string
     #            bound, and the draft-04 boolean `exclusiveMinimum` modifier
     #   options — the reported `options` schema: a schema-valued
     #            additionalProperties whose values must match one of three
@@ -505,6 +506,20 @@ JSON
     assert_output 'Invalid array item(s): values[0]=["a","b"] (allowed: a, b).'
 }
 
+@test "validate_tool_arguments: an enum with an object member names its allowed values on a rejected value" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"enum": [{"x": 1}, "b"]}}}'
+    run validate_tool_arguments "one" '{"x": "c"}'
+    assert_failure 1
+    assert_output 'Invalid value(s): x="c" (allowed: {"x":1}, b).'
+}
+
+@test "validate_tool_arguments: an items enum with an array member names its allowed values on a rejected element" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"items": {"enum": [[1], "b"]}}}}'
+    run validate_tool_arguments "one" '{"x": ["c"]}'
+    assert_failure 1
+    assert_output 'Invalid array item(s): x[0]="c" (allowed: [1], b).'
+}
+
 @test "validate_tool_arguments: type precedence — a type violation is reported before an unrelated pattern violation" {
     # count is wrong-typed; name's pattern also fails. Type is reported first.
     run validate_tool_arguments "typed" '{"name": "ABC", "count": "5"}'
@@ -612,32 +627,34 @@ _assert_union_rejects() {
     assert_output --partial 'values[1] expected integer or string, got boolean (true)'
 }
 
-@test "validate_tool_arguments: an empty type list is malformed and left unenforced" {
+# The `malformed` schema carries four wrong-typed `type` lists, so every call
+# against it is refused with all four named in tree order, whichever argument
+# the call sends. These four calls ran with the list left unenforced before
+# the shape check.
+MALFORMED_TYPE_MESSAGE="Cannot validate arguments for malformed: its inputSchema keyword(s) have the wrong type: properties.empty.type must be a string or a non-empty array of strings; properties.emptyitems.items.type must be a string or a non-empty array of strings; properties.mixed.type must be a string or a non-empty array of strings; properties.mixeditems.items.type must be a string or a non-empty array of strings."
+
+@test "validate_tool_arguments: an empty type list is refused as wrong-typed" {
     run validate_tool_arguments "malformed" '{"empty": true}'
-    assert_success
-    assert_output ""
+    assert_failure 1
+    assert_output "${MALFORMED_TYPE_MESSAGE}"
 }
 
-@test "validate_tool_arguments: a type list carrying a non-string member is malformed and left unenforced" {
+@test "validate_tool_arguments: a type list carrying a non-string member is refused as wrong-typed" {
     run validate_tool_arguments "malformed" '{"mixed": true}'
-    assert_success
-    assert_output ""
+    assert_failure 1
+    assert_output "${MALFORMED_TYPE_MESSAGE}"
 }
 
-# `items.type` carries the same malformed-list guard as a property `type`, and
-# it is a separate expression in the jq program. Without these two, a
-# regression that made a malformed `items.type` reject every element would
-# leave the whole suite passing.
-@test "validate_tool_arguments: an empty items type list is malformed and leaves every element unenforced" {
+@test "validate_tool_arguments: an empty items type list is refused as wrong-typed" {
     run validate_tool_arguments "malformed" '{"emptyitems": [true, {"a": 1}]}'
-    assert_success
-    assert_output ""
+    assert_failure 1
+    assert_output "${MALFORMED_TYPE_MESSAGE}"
 }
 
-@test "validate_tool_arguments: an items type list carrying a non-string member is malformed and leaves every element unenforced" {
+@test "validate_tool_arguments: an items type list carrying a non-string member is refused as wrong-typed" {
     run validate_tool_arguments "malformed" '{"mixeditems": [true, {"a": 1}]}'
-    assert_success
-    assert_output ""
+    assert_failure 1
+    assert_output "${MALFORMED_TYPE_MESSAGE}"
 }
 
 # --- validate_tool_arguments: numeric range keywords ---
@@ -736,19 +753,22 @@ _assert_union_rejects() {
     assert_output --partial "untyped=2 below minimum 3"
 }
 
-@test "validate_tool_arguments: a non-number bound is malformed and left unenforced" {
+# Both calls ran with the bound left unenforced before the shape check.
+BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keyword(s) have the wrong type: properties.draft04.exclusiveMinimum must be a number; properties.stringbound.minimum must be a number."
+
+@test "validate_tool_arguments: a string bound is refused as wrong-typed" {
     run validate_tool_arguments "badrange" '{"stringbound": 1}'
-    assert_success
-    assert_output ""
+    assert_failure 1
+    assert_output "${BADRANGE_MESSAGE}"
 }
 
-@test "validate_tool_arguments: the draft-04 boolean form of exclusiveMinimum is left unenforced" {
-    # draft-04 spelled the exclusive bound as a modifier on `minimum`, so
-    # `{"minimum": 0, "exclusiveMinimum": true}` rejects 0 there. This
-    # validator implements only the numeric form, so 0 is accepted.
+@test "validate_tool_arguments: the draft-04 boolean form of exclusiveMinimum is refused as wrong-typed" {
+    # draft-04 spelled the exclusive bound as a modifier on `minimum`. This
+    # validator implements only the numeric form, so the boolean is refused
+    # rather than read as a bound.
     run validate_tool_arguments "badrange" '{"draft04": 0}'
-    assert_success
-    assert_output ""
+    assert_failure 1
+    assert_output "${BADRANGE_MESSAGE}"
 }
 
 @test "validate_tool_arguments: two out-of-range properties in one call are both named in one message" {
@@ -1088,6 +1108,436 @@ JSON
     run validate_tool_arguments "annotated" '{"when": 5}'
     assert_failure 1
     assert_output "Invalid type(s): when expected string, got number (5)."
+}
+
+# --- handle_tools_call: schema keywords with the wrong type ---
+
+# A wrong-typed keyword either enforced nothing — the tool ran — or made the
+# call answer "they could not be evaluated against its schema", which names no
+# keyword. Each refusal below took one of those two paths before the shape check.
+
+# Replace the tools list with one tool `shape` declaring <schema-json>, call it
+# through handle_tools_call with <arguments-json> (default `{}`), and assert an
+# isError result whose text names exactly <defects> and that the tool did not run.
+_assert_shape_refused() {
+    local schema_json="$1" defects="$2" arguments_json="{}"
+    if [[ $# -ge 3 ]]; then
+        arguments_json="$3"
+    fi
+    local marker="${BATS_TEST_TMPDIR}/shape.ran"
+    jq -nc --argjson s "${schema_json}" '{tools: [{name: "shape", inputSchema: $s}]}' > "${MCP_TOOLS_LIST_FILE}"
+    tool_shape() { : > "${marker}"; }
+    local params
+    params=$(jq -nc --argjson a "${arguments_json}" '{name: "shape", arguments: $a}')
+
+    run handle_tools_call 1 "${params}"
+
+    assert_success
+    run jq -r '.result.isError, .result.content[0].text' <<< "${output}"
+    assert_output "true
+Cannot validate arguments for shape: its inputSchema keyword(s) have the wrong type: ${defects}."
+    assert [ ! -e "${marker}" ]
+}
+
+# Property `x` declares <keyword> with <value-json>.
+_assert_property_keyword_refused() {
+    local keyword="$1" value_json="$2" shape="$3"
+    _assert_shape_refused \
+        "$(jq -nc --arg k "${keyword}" --argjson v "${value_json}" '{type: "object", properties: {x: {($k): $v}}}')" \
+        "properties.x.${keyword} must be ${shape}"
+}
+
+# The items schema of array property `x` declares <keyword> with <value-json>.
+_assert_items_keyword_refused() {
+    local keyword="$1" value_json="$2" shape="$3"
+    _assert_shape_refused \
+        "$(jq -nc --arg k "${keyword}" --argjson v "${value_json}" '{type: "object", properties: {x: {type: "array", items: {($k): $v}}}}')" \
+        "properties.x.items.${keyword} must be ${shape}"
+}
+
+# The second oneOf branch of property `x` declares <keyword> with <value-json>.
+_assert_one_of_keyword_refused() {
+    local keyword="$1" value_json="$2" shape="$3"
+    _assert_shape_refused \
+        "$(jq -nc --arg k "${keyword}" --argjson v "${value_json}" '{type: "object", properties: {x: {oneOf: [{type: "string"}, {($k): $v}]}}}')" \
+        "properties.x.oneOf[1].${keyword} must be ${shape}"
+}
+
+TYPE_SHAPE="a string or a non-empty array of strings"
+
+@test "handle_tools_call: a false type is refused naming its path" {
+    _assert_property_keyword_refused type 'false' "${TYPE_SHAPE}"
+}
+
+@test "handle_tools_call: a null type is refused naming its path" {
+    _assert_property_keyword_refused type 'null' "${TYPE_SHAPE}"
+}
+
+@test "handle_tools_call: a numeric type is refused naming its path" {
+    _assert_property_keyword_refused type '5' "${TYPE_SHAPE}"
+}
+
+@test "handle_tools_call: a type list holding a number is refused naming its path" {
+    _assert_property_keyword_refused type '[5]' "${TYPE_SHAPE}"
+}
+
+@test "handle_tools_call: a wrong-typed type inside items is refused naming its path" {
+    _assert_items_keyword_refused type 'false' "${TYPE_SHAPE}"
+}
+
+@test "handle_tools_call: a false minimum is refused naming its path" {
+    _assert_property_keyword_refused minimum 'false' "a number"
+}
+
+@test "handle_tools_call: a null minimum is refused naming its path" {
+    _assert_property_keyword_refused minimum 'null' "a number"
+}
+
+@test "handle_tools_call: a string minimum is refused naming its path" {
+    _assert_property_keyword_refused minimum '"1"' "a number"
+}
+
+@test "handle_tools_call: a wrong-typed minimum inside items is refused naming its path" {
+    _assert_items_keyword_refused minimum '"1"' "a number"
+}
+
+@test "handle_tools_call: a false maximum is refused naming its path" {
+    _assert_property_keyword_refused maximum 'false' "a number"
+}
+
+@test "handle_tools_call: a null maximum is refused naming its path" {
+    _assert_property_keyword_refused maximum 'null' "a number"
+}
+
+@test "handle_tools_call: a string maximum is refused naming its path" {
+    _assert_property_keyword_refused maximum '"1"' "a number"
+}
+
+@test "handle_tools_call: a wrong-typed maximum inside a oneOf branch is refused naming its path" {
+    _assert_one_of_keyword_refused maximum 'null' "a number"
+}
+
+@test "handle_tools_call: a false exclusiveMinimum is refused naming its path" {
+    _assert_property_keyword_refused exclusiveMinimum 'false' "a number"
+}
+
+@test "handle_tools_call: a null exclusiveMinimum is refused naming its path" {
+    _assert_property_keyword_refused exclusiveMinimum 'null' "a number"
+}
+
+@test "handle_tools_call: a string exclusiveMinimum is refused naming its path" {
+    _assert_property_keyword_refused exclusiveMinimum '"1"' "a number"
+}
+
+@test "handle_tools_call: the draft-04 exclusiveMinimum true is refused naming its path" {
+    _assert_property_keyword_refused exclusiveMinimum 'true' "a number"
+}
+
+@test "handle_tools_call: a wrong-typed exclusiveMinimum inside items is refused naming its path" {
+    _assert_items_keyword_refused exclusiveMinimum 'true' "a number"
+}
+
+@test "handle_tools_call: a false exclusiveMaximum is refused naming its path" {
+    _assert_property_keyword_refused exclusiveMaximum 'false' "a number"
+}
+
+@test "handle_tools_call: a null exclusiveMaximum is refused naming its path" {
+    _assert_property_keyword_refused exclusiveMaximum 'null' "a number"
+}
+
+@test "handle_tools_call: a string exclusiveMaximum is refused naming its path" {
+    _assert_property_keyword_refused exclusiveMaximum '"1"' "a number"
+}
+
+@test "handle_tools_call: a wrong-typed exclusiveMaximum inside a oneOf branch is refused naming its path" {
+    _assert_one_of_keyword_refused exclusiveMaximum 'true' "a number"
+}
+
+PATTERN_SHAPE="a string holding a valid regular expression"
+
+@test "handle_tools_call: a false pattern is refused naming its path" {
+    _assert_property_keyword_refused pattern 'false' "${PATTERN_SHAPE}"
+}
+
+@test "handle_tools_call: a null pattern is refused naming its path" {
+    _assert_property_keyword_refused pattern 'null' "${PATTERN_SHAPE}"
+}
+
+@test "handle_tools_call: a numeric pattern is refused naming its path" {
+    _assert_property_keyword_refused pattern '5' "${PATTERN_SHAPE}"
+}
+
+@test "handle_tools_call: a pattern that does not compile is refused naming its path" {
+    _assert_property_keyword_refused pattern '"("' "${PATTERN_SHAPE}"
+}
+
+@test "handle_tools_call: a wrong-typed pattern inside items is refused naming its path" {
+    _assert_items_keyword_refused pattern '"("' "${PATTERN_SHAPE}"
+}
+
+@test "handle_tools_call: a false required is refused naming its path" {
+    _assert_property_keyword_refused required 'false' "an array of strings"
+}
+
+@test "handle_tools_call: a null required is refused naming its path" {
+    _assert_property_keyword_refused required 'null' "an array of strings"
+}
+
+@test "handle_tools_call: a string required is refused naming its path" {
+    _assert_property_keyword_refused required '"x"' "an array of strings"
+}
+
+@test "handle_tools_call: a required list holding a number is refused naming its path" {
+    _assert_property_keyword_refused required '[5]' "an array of strings"
+}
+
+@test "handle_tools_call: a wrong-typed required inside a oneOf branch is refused naming its path" {
+    _assert_one_of_keyword_refused required 'false' "an array of strings"
+}
+
+@test "handle_tools_call: a false enum is refused naming its path" {
+    _assert_property_keyword_refused enum 'false' "an array"
+}
+
+@test "handle_tools_call: a null enum is refused naming its path" {
+    _assert_property_keyword_refused enum 'null' "an array"
+}
+
+@test "handle_tools_call: a numeric enum is refused naming its path" {
+    _assert_property_keyword_refused enum '5' "an array"
+}
+
+@test "handle_tools_call: a wrong-typed enum inside items is refused naming its path" {
+    _assert_items_keyword_refused enum 'null' "an array"
+}
+
+@test "handle_tools_call: a false properties is refused naming its path" {
+    _assert_property_keyword_refused properties 'false' "an object"
+}
+
+@test "handle_tools_call: a null properties is refused naming its path" {
+    _assert_property_keyword_refused properties 'null' "an object"
+}
+
+@test "handle_tools_call: a numeric properties is refused naming its path" {
+    _assert_property_keyword_refused properties '5' "an object"
+}
+
+@test "handle_tools_call: a property schema that is not an object is refused naming its path" {
+    _assert_shape_refused '{"type": "object", "properties": {"x": 5}}' "properties.x must be an object"
+}
+
+@test "handle_tools_call: a wrong-typed properties inside a oneOf branch is refused naming its path" {
+    _assert_one_of_keyword_refused properties 'false' "an object"
+}
+
+@test "handle_tools_call: a false items is refused naming its path" {
+    _assert_property_keyword_refused items 'false' "an object"
+}
+
+@test "handle_tools_call: a null items is refused naming its path" {
+    _assert_property_keyword_refused items 'null' "an object"
+}
+
+@test "handle_tools_call: a numeric items is refused naming its path" {
+    _assert_property_keyword_refused items '5' "an object"
+}
+
+@test "handle_tools_call: a tuple-form items array is refused naming its path" {
+    _assert_property_keyword_refused items '[{"type": "string"}]' "an object"
+}
+
+@test "handle_tools_call: a wrong-typed items inside items is refused naming its path" {
+    _assert_items_keyword_refused items 'false' "an object"
+}
+
+AP_SHAPE="a boolean or an object"
+
+@test "handle_tools_call: a null additionalProperties is refused naming its path" {
+    _assert_property_keyword_refused additionalProperties 'null' "${AP_SHAPE}"
+}
+
+@test "handle_tools_call: a numeric additionalProperties is refused naming its path" {
+    _assert_property_keyword_refused additionalProperties '5' "${AP_SHAPE}"
+}
+
+@test "handle_tools_call: a string additionalProperties is refused naming its path" {
+    _assert_property_keyword_refused additionalProperties '"x"' "${AP_SHAPE}"
+}
+
+@test "handle_tools_call: a wrong-typed additionalProperties inside a oneOf branch is refused naming its path" {
+    _assert_one_of_keyword_refused additionalProperties 'null' "${AP_SHAPE}"
+}
+
+@test "handle_tools_call: a false oneOf is refused naming its path" {
+    _assert_property_keyword_refused oneOf 'false' "an array of objects"
+}
+
+@test "handle_tools_call: a null oneOf is refused naming its path" {
+    _assert_property_keyword_refused oneOf 'null' "an array of objects"
+}
+
+@test "handle_tools_call: a numeric oneOf is refused naming its path" {
+    _assert_property_keyword_refused oneOf '5' "an array of objects"
+}
+
+@test "handle_tools_call: a oneOf holding a number is refused naming its path" {
+    _assert_property_keyword_refused oneOf '[5]' "an array of objects"
+}
+
+@test "handle_tools_call: a wrong-typed oneOf inside items is refused naming its path" {
+    _assert_items_keyword_refused oneOf 'null' "an array of objects"
+}
+
+@test "handle_tools_call: a wrong-typed keyword at the root is refused naming its bare path" {
+    _assert_shape_refused '{"type": "object", "required": false}' "required must be an array of strings"
+}
+
+@test "handle_tools_call: a numeric inputSchema is refused as inputSchema" {
+    _assert_shape_refused '5' "inputSchema must be an object"
+}
+
+@test "handle_tools_call: a false inputSchema is refused as inputSchema" {
+    _assert_shape_refused 'false' "inputSchema must be an object"
+}
+
+@test "handle_tools_call: an array inputSchema is refused as inputSchema" {
+    _assert_shape_refused '[]' "inputSchema must be an object"
+}
+
+@test "handle_tools_call: every wrong-typed keyword is named, in tree order" {
+    _assert_shape_refused \
+        '{"type": "object", "required": false, "properties": {"b": {"enum": null}, "a": {"minimum": "1"}}}' \
+        "properties.a.minimum must be a number; properties.b.enum must be an array; required must be an array of strings"
+}
+
+@test "handle_tools_call: a wrong-typed keyword is refused before the arguments are checked" {
+    # `null` arguments would otherwise answer the non-object rejection.
+    _assert_shape_refused '{"type": "object", "required": false}' "required must be an array of strings" 'null'
+}
+
+# An unknown keyword and a wrong-typed one in the same schema answer the
+# unenforced-keyword message: that check runs first, and its message names
+# every keyword the schema would need the validator to enforce.
+@test "handle_tools_call: an unknown keyword beside a wrong-typed one answers the unenforced-keyword message" {
+    local marker="${BATS_TEST_TMPDIR}/shape.ran"
+    printf '%s\n' '{"tools": [{"name": "shape", "inputSchema": {"type": "object", "properties": {"x": {"minLength": 1, "required": false}}}}]}' > "${MCP_TOOLS_LIST_FILE}"
+    tool_shape() { : > "${marker}"; }
+
+    run handle_tools_call 1 '{"name": "shape", "arguments": {}}'
+
+    assert_success
+    run jq -r '.result.isError, .result.content[0].text' <<< "${output}"
+    assert_output "true
+Cannot validate arguments for shape: its inputSchema uses keyword(s) this validator does not enforce: properties.x.minLength."
+    assert [ ! -e "${marker}" ]
+}
+
+# The unenforced-keyword walk does not descend into a wrong-typed position, so
+# an unknown keyword inside a tuple-form `items` array answers the shape message.
+@test "handle_tools_call: an unknown keyword inside a wrong-typed items answers the shape message" {
+    _assert_property_keyword_refused items '[{"minLength": 1}]' "an object"
+}
+
+# --- validate_tool_arguments: well-typed keywords keep their behavior ---
+
+# Guards of behavior the shape check keeps: each keyword below has a value of
+# the accepted shape that a value test could mistake for a wrong or absent one.
+
+# Replace the tools list with one tool `one` declaring <schema-json>.
+_write_one_tool() {
+    jq -nc --argjson s "$1" '{tools: [{name: "one", inputSchema: $s}]}' > "${MCP_TOOLS_LIST_FILE}"
+}
+
+@test "validate_tool_arguments: a type list naming null accepts null (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"type": ["string", "null"]}}}'
+    run validate_tool_arguments "one" '{"x": null}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: a minimum of 0 is enforced (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"minimum": 0}}}'
+    run validate_tool_arguments "one" '{"x": -1}'
+    assert_failure 1
+    assert_output "Out-of-range value(s): x=-1 below minimum 0."
+}
+
+@test "validate_tool_arguments: a maximum of 0 is enforced (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"maximum": 0}}}'
+    run validate_tool_arguments "one" '{"x": 1}'
+    assert_failure 1
+    assert_output "Out-of-range value(s): x=1 above maximum 0."
+}
+
+@test "validate_tool_arguments: an exclusiveMinimum of 0 is enforced (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"exclusiveMinimum": 0}}}'
+    run validate_tool_arguments "one" '{"x": 0}'
+    assert_failure 1
+    assert_output "Out-of-range value(s): x=0 not above exclusiveMinimum 0."
+}
+
+@test "validate_tool_arguments: an exclusiveMaximum of 0 is enforced (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"exclusiveMaximum": 0}}}'
+    run validate_tool_arguments "one" '{"x": 0}'
+    assert_failure 1
+    assert_output "Out-of-range value(s): x=0 not below exclusiveMaximum 0."
+}
+
+@test "validate_tool_arguments: an empty pattern accepts any string (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"pattern": ""}}}'
+    run validate_tool_arguments "one" '{"x": "anything"}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an empty required list requires nothing (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "required": []}'
+    run validate_tool_arguments "one" '{}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an enum holding false is enforced (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"enum": [false]}}}'
+    run validate_tool_arguments "one" '{"x": true}'
+    assert_failure 1
+    assert_output 'Invalid value(s): x="true" (allowed: false).'
+}
+
+@test "validate_tool_arguments: an items enum holding false is enforced (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"items": {"enum": [false]}}}}'
+    run validate_tool_arguments "one" '{"x": [false, true]}'
+    assert_failure 1
+    assert_output "Invalid array item(s): x[1]=true (allowed: false)."
+}
+
+@test "validate_tool_arguments: an empty properties object allows any property (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {}}'
+    run validate_tool_arguments "one" '{"y": 1}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: an empty items schema accepts any element (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"items": {}}}}'
+    run validate_tool_arguments "one" '{"x": [1, "a", null]}'
+    assert_success
+    assert_output ""
+}
+
+@test "validate_tool_arguments: additionalProperties false is enforced (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {"x": {}}, "additionalProperties": false}'
+    run validate_tool_arguments "one" '{"y": 1}'
+    assert_failure 1
+    assert_output "Unknown parameter(s): y. Allowed parameters: x."
+}
+
+@test "validate_tool_arguments: a oneOf of one empty branch accepts any value (guard: unchanged behavior)" {
+    _write_one_tool '{"type": "object", "properties": {"x": {"oneOf": [{}]}}}'
+    run validate_tool_arguments "one" '{"x": 1}'
+    assert_success
+    assert_output ""
 }
 
 # --- validate_tool_arguments: arguments that are not a JSON object ---

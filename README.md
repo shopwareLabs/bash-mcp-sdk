@@ -38,7 +38,7 @@ There is no install step. Copy `lib/mcpserver_core.sh` into your project and `so
 | `handle_initialize`       | The `initialize` handler `process_request` routes to. Answers `protocolVersion`, `serverInfo` and `capabilities`. |
 | `handle_tools_list`       | The `tools/list` handler `process_request` routes to. Answers the `tools` array. |
 | `handle_tools_call`       | The `tools/call` handler `process_request` routes to. A consumer can drive it directly to dispatch one call without the read loop. |
-| `validate_tool_arguments` | Check a call's arguments against the tool's `inputSchema`. Rejects a tool that the tools list does not declare exactly once with a non-null `inputSchema`, or whose `inputSchema` uses a keyword the validator does not enforce. |
+| `validate_tool_arguments` | Check a call's arguments against the tool's `inputSchema`. Rejects a tool that the tools list does not declare exactly once with a non-null `inputSchema`, whose `inputSchema` uses a keyword the validator does not enforce, or whose `inputSchema` holds a keyword of the wrong type, such as `"required": false`. |
 | `create_response`         | Build a JSON-RPC result envelope.                                     |
 | `create_error_response`   | Build a JSON-RPC error envelope. Optional 4th arg `data` (JSON value) is included when non-empty. |
 | `log`                     | Append to `MCP_LOG_FILE`, and to `MCP_EXTRA_LOG_FILE` when set.       |
@@ -70,7 +70,7 @@ Set by the SDK for a call, not by the consumer:
 
 Methods handled: `initialize`, `tools/list`, `tools/call` and `ping`; the notifications `notifications/initialized` and `notifications/cancelled`. A request for any other method returns `-32601`; a notification for one is logged and ignored.
 
-How a missing configuration file, an invalid `id` and a malformed line are answered: [Configuration files and protocol handling](./docs/server-contract.md#configuration-files-and-protocol-handling).
+How a missing configuration file, an invalid `id`, a non-string `method` and a malformed line are answered: [Configuration files and protocol handling](./docs/server-contract.md#configuration-files-and-protocol-handling).
 
 ### Writing a server
 
