@@ -227,6 +227,11 @@ if [[ -z "${_MCP_CANCEL_GRACE_SECONDS:-}" ]]; then
     readonly _MCP_CANCEL_GRACE_SECONDS=2
 fi
 
+# Responses get a private copy of stdout; later writes to fd 1 go to stderr.
+if [[ -z "${_MCP_PROTOCOL_FD:-}" ]]; then
+    exec {_MCP_PROTOCOL_FD}>&1 1>&2
+fi
+
 log() {
     local level="$1"
     local message="$2"
@@ -1240,7 +1245,7 @@ _run_cancel_hook() {
     # into a removal under `/`, so with no directory to name it is unset, which
     # also drops a value inherited from the environment.
     # shellcheck disable=SC2031 # The hook's MCP_CALL_TMPDIR is set in this subshell alone, independent of any wrapper's.
-    ( if [[ -n "${_MCP_LIFELINE_FD:-}" ]]; then exec {_MCP_LIFELINE_FD}>&-; fi; set +e; if [[ -n "$call_tmpdir" ]]; then export MCP_CALL_TMPDIR="$call_tmpdir"; else unset MCP_CALL_TMPDIR; fi; "$hook" "$arguments" ) >/dev/null 2>&1 </dev/null &
+    ( if [[ -n "${_MCP_LIFELINE_FD:-}" ]]; then exec {_MCP_LIFELINE_FD}>&-; fi; if [[ -n "${_MCP_PROTOCOL_FD:-}" ]]; then exec {_MCP_PROTOCOL_FD}>&-; fi; set +e; if [[ -n "$call_tmpdir" ]]; then export MCP_CALL_TMPDIR="$call_tmpdir"; else unset MCP_CALL_TMPDIR; fi; "$hook" "$arguments" ) >/dev/null 2>&1 </dev/null &
     hook_pid=$!
     if [[ "$monitor_was_enabled" == "1" ]]; then
         set -m
@@ -1557,6 +1562,10 @@ process_request() {
         exec {_MCP_LIFELINE_FD}>&-
         _MCP_LIFELINE_FD=""
     fi
+    if [[ "${_MCP_IN_SERVER_LOOP:-0}" == "1" && -n "${_MCP_PROTOCOL_FD:-}" ]]; then
+        exec {_MCP_PROTOCOL_FD}>&-
+        _MCP_PROTOCOL_FD=""
+    fi
 
     # Parse gate: exactly one JSON document, of any type. `jq -e '.'` accepted a
     # line holding two documents — it reports only its last output — and the id
@@ -1828,6 +1837,10 @@ _server_teardown() {
         exec {_MCP_LIFELINE_FD}>&-
         _MCP_LIFELINE_FD=""
     fi
+    if [[ -n "${_MCP_PROTOCOL_FD:-}" ]]; then
+        exec {_MCP_PROTOCOL_FD}>&-
+        _MCP_PROTOCOL_FD=""
+    fi
     if [[ -n "${_MCP_LIFELINE_DIR:-}" ]]; then
         rm -rf -- "${_MCP_LIFELINE_DIR}"
         _MCP_LIFELINE_DIR=""
@@ -2067,7 +2080,7 @@ run_mcp_server() {
 
         if [[ -n "$response" ]]; then
             log "RESPONSE" "${response:0:100}..."
-            echo "$response"
+            echo "$response" >&"${_MCP_PROTOCOL_FD}"
         fi
 
         # Read after the response is out, so a dispatch's fragment never holds
