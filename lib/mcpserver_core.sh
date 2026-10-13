@@ -1517,14 +1517,9 @@ _mcp_run_tool() {
         # deliberately not bypassed: a function the hook defines reaches the
         # tool. docs/server-contract.md §Running a step before every tool.
         # Restored before any step below runs, so an errexit or nounset the hook
-        # turned on governs neither those steps nor the tool. Three passes. The
-        # `shopt` snapshot goes first: on bash 4.4 and later its extdebug line
-        # turns errtrace and functrace off (`shopt -u`) or on (`shopt -s`), and
-        # the `set` snapshot then puts them back. The `set` snapshot holds a
-        # `set -o posix` or `set +o posix` line, which also rewrites shopt
-        # options such as expand_aliases, so the `shopt` snapshot runs once
-        # more to put those back, with extdebug left out so errtrace and
-        # functrace stay as the `set` snapshot left them.
+        # turned on governs neither those steps nor the tool. The three passes
+        # exist because one replay rewrites options another set.
+        # docs/architecture.md §Tool containment.
         builtin eval "builtin ${6//$'\n'/$'\n'builtin }"
         builtin eval "builtin ${5//$'\n'/$'\n'builtin }"
         builtin eval "builtin ${10//$'\n'/$'\n'builtin }"
@@ -1853,6 +1848,11 @@ _lifeline_sentinel() {
     local read_fd="$1"
 
     trap '' TERM INT HUP
+
+    # A server may turn posix mode on, and posix mode turns process substitution
+    # off on Bash 4.1 to 5.0. The sentinel is a background process of its own,
+    # so turning posix mode off here changes no other process.
+    builtin set +o posix
 
     local pgid=""
     local entry_pid entry_pgid

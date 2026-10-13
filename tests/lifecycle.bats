@@ -14,6 +14,7 @@ bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
 load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
+load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 CANCELLATION_SERVER="${REPO_ROOT}/tests/fixtures/cancellation_server.sh"
 
@@ -185,7 +186,7 @@ setup() {
 teardown() {
     mcp_stop_server
     unset MCP_LOG_FILE SLOW_MARKER_FILE CHILD_PID_FILE GRANDCHILD_PID_FILE \
-        SLOW_SECS MCP_SERVER_PGID TMPDIR CANCEL_HOOK_FILE _MCP_INFLIGHT_FILE \
+        SLOW_SECS TOOL_SLEEP_PID_FILE MCP_SERVER_PGID TMPDIR CANCEL_HOOK_FILE _MCP_INFLIGHT_FILE \
         MCP_SERVER_INSTANCE
 }
 
@@ -267,6 +268,38 @@ teardown() {
     run _mcp_wait_for_exit "${grandchild_pid}" 3
     assert_success
     run _mcp_wait_for_proc_count 0 3
+    assert_success
+}
+
+@test "SIGKILL to the server pid leaves no tool process behind when the server runs in posix mode" {
+    # Posix mode switches process substitution off on Bash 4.1 to 5.0. The
+    # sentinel turns posix mode off for itself; without that, it would find no
+    # group id there and kill nothing. `set -o posix` goes after the `source`
+    # line, which Bash 4.1 to 5.0 cannot parse in posix mode.
+    export TOOL_SLEEP_PID_FILE="${BATS_TEST_TMPDIR}/sleep.pid"
+    printf '%s\n' '{}' > "${BATS_TEST_TMPDIR}/config.json"
+    printf '%s\n' '{"tools": [{"name": "hold", "inputSchema": {"type": "object"}}]}' \
+        > "${BATS_TEST_TMPDIR}/tools.json"
+    local server="${BATS_TEST_TMPDIR}/posix_server.sh"
+    write_server "${server}" <<'BODY'
+set -o posix
+tool_hold() {
+    sleep 30 &
+    printf '%s\n' "$!" > "${TOOL_SLEEP_PID_FILE}"
+    wait
+}
+BODY
+    mcp_start_server_isolated "${server}"
+    mcp_send '{"jsonrpc":"2.0","id":161,"method":"tools/call","params":{"name":"hold","arguments":{}}}'
+
+    run _mcp_wait_for_file "${TOOL_SLEEP_PID_FILE}" 5
+    assert_success
+    local sleep_pid
+    sleep_pid="$(<"${TOOL_SLEEP_PID_FILE}")"
+
+    kill -KILL "${MCP_SERVER_PID}" 2>/dev/null || true
+
+    run _mcp_wait_for_exit "${sleep_pid}" 3
     assert_success
 }
 
