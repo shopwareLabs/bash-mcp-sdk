@@ -1469,8 +1469,9 @@ _mcp_run_tool() {
     if declare -F mcp_before_tool_call >/dev/null; then
         # $5 and $6 hold the shell option snapshots the restore below
         # re-executes, $7 the ERR trap in force before the hook (empty when
-        # there is none), $8 the SDK's own ERR trap, and $9 the hook's status.
-        # They are positional so the hook cannot overwrite them.
+        # there is none), $8 the SDK's own ERR trap, $9 the hook's status and
+        # $10 the `shopt` snapshot for the last restore pass. They are
+        # positional so the hook cannot overwrite them.
         set -- "$1" "$2" "$3" "$4" "$(set +o)" "$(shopt -p)" "$(trap -p ERR)"
         # The marker outlives the wrapper only when the hook never returned —
         # it called `exit`, its errexit or nounset stopped it, or a signal killed
@@ -1501,6 +1502,8 @@ _mcp_run_tool() {
         # named `set` from taking over the append.
         { mcp_before_tool_call "$2" "$3"; } >"$4/hook-output" 2>&1
         builtin set -- "$@" "$?"
+        # The `shopt` snapshot with its extdebug line made a no-op: `builtin :`.
+        builtin set -- "$@" "${6//shopt -? extdebug/:}"
         # Every step below runs after the hook returned, so each one bypasses
         # what the hook may have changed: a function it defined named `set`,
         # `shopt` or `printf` must not take over the SDK's own steps, and a PATH
@@ -1514,11 +1517,17 @@ _mcp_run_tool() {
         # deliberately not bypassed: a function the hook defines reaches the
         # tool. docs/server-contract.md §Running a step before every tool.
         # Restored before any step below runs, so an errexit or nounset the hook
-        # turned on governs neither those steps nor the tool. The `shopt`
-        # snapshot goes first: its `shopt -u extdebug` turns errtrace and
-        # functrace off, and the `set` snapshot then puts them back.
+        # turned on governs neither those steps nor the tool. Three passes. The
+        # `shopt` snapshot goes first: on bash 4.4 and later its extdebug line
+        # turns errtrace and functrace off (`shopt -u`) or on (`shopt -s`), and
+        # the `set` snapshot then puts them back. The `set` snapshot holds a
+        # `set -o posix` or `set +o posix` line, which also rewrites shopt
+        # options such as expand_aliases, so the `shopt` snapshot runs once
+        # more to put those back, with extdebug left out so errtrace and
+        # functrace stay as the `set` snapshot left them.
         builtin eval "builtin ${6//$'\n'/$'\n'builtin }"
         builtin eval "builtin ${5//$'\n'/$'\n'builtin }"
+        builtin eval "builtin ${10//$'\n'/$'\n'builtin }"
         # An ERR trap the hook installed and still in force stays, and reaches
         # the tool when errtrace is on; otherwise the trap in force before the
         # hook is put back. With errtrace off, bash 4.1 to 4.3 drop the hook's
