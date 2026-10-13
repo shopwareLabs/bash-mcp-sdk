@@ -622,6 +622,99 @@ BODY
     _assert_result_text "${output}" false "1"
 }
 
+@test "a hook that runs set -o posix leaves expand_aliases, errtrace and posix as the tool had them" {
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+set -E
+shopt -s expand_aliases
+mcp_before_tool_call() {
+    set -o posix
+    return 0
+}
+tool_x() {
+    local aliases=off errtrace=off posix=off
+    shopt -q expand_aliases && aliases=on
+    [[ $- == *E* ]] && errtrace=on
+    [[ :${SHELLOPTS}: == *:posix:* ]] && posix=on
+    printf 'expand_aliases=%s errtrace=%s posix=%s\n' "${aliases}" "${errtrace}" "${posix}"
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    # The snapshot has expand_aliases on and posix off. Replaying the set
+    # snapshot's `set +o posix` turns expand_aliases off, so the tool sees it
+    # on only when the shopt values are replayed after that line, and
+    # errtrace on only when that replay leaves extdebug out.
+    _assert_result_text "${output}" false "expand_aliases=on errtrace=on posix=off"
+}
+
+@test "a hook that runs set +o posix leaves inherit_errexit off and posix on as the tool had them" {
+    if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+        skip "bash ${BASH_VERSION} has no inherit_errexit option"
+    fi
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+set -o posix
+shopt -u inherit_errexit
+mcp_before_tool_call() {
+    set +o posix
+    return 0
+}
+tool_x() {
+    local inherit=off posix=off
+    shopt -q inherit_errexit && inherit=on
+    [[ :${SHELLOPTS}: == *:posix:* ]] && posix=on
+    printf 'inherit_errexit=%s posix=%s\n' "${inherit}" "${posix}"
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    # set -o posix turns inherit_errexit on, so the snapshot taken with it
+    # off only survives a restore that replays the shopt values after the
+    # posix line.
+    _assert_result_text "${output}" false "inherit_errexit=off posix=on"
+}
+
+@test "a hook that runs set -o posix leaves errtrace and functrace off when extdebug is on" {
+    if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+        skip "bash ${BASH_VERSION}: extdebug does not change errtrace or functrace before 4.4"
+    fi
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+shopt -s extdebug
+set +E +T
+mcp_before_tool_call() {
+    set -o posix
+    return 0
+}
+tool_x() {
+    local extdebug=off errtrace=off functrace=off posix=off
+    shopt -q extdebug && extdebug=on
+    [[ $- == *E* ]] && errtrace=on
+    [[ $- == *T* ]] && functrace=on
+    [[ :${SHELLOPTS}: == *:posix:* ]] && posix=on
+    printf 'extdebug=%s errtrace=%s functrace=%s posix=%s\n' "${extdebug}" "${errtrace}" "${functrace}" "${posix}"
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    # The last restore pass replays the shopt snapshot, and replaying its
+    # `shopt -s extdebug` line would turn errtrace and functrace back on.
+    _assert_result_text "${output}" false "extdebug=on errtrace=off functrace=off posix=off"
+}
+
 @test "process_request: variables the hook assigns do not change which tool runs, its arguments, or how the call is reported" {
     local inner_marker="${BATS_TEST_TMPDIR}/inner.ran"
     # Each assignment is non-local, so it lands in whatever variable of that
