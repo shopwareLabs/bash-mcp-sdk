@@ -33,7 +33,7 @@ load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 PAYLOAD_BYTES=1100000
 
 setup() {
-    export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
+    mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
     export PAYLOAD_FILE="${BATS_TEST_TMPDIR}/payload.txt"
     export MULTIBYTE_FILE="${BATS_TEST_TMPDIR}/multibyte.txt"
     export ARGS_FILE="${BATS_TEST_TMPDIR}/received-arguments.json"
@@ -111,10 +111,8 @@ _assert_call_text_then_ping() {
 }
 
 # Source the SDK into the test shell, for the cases that call its envelope
-# builders directly. MCP_LOG_FILE is already exported by setup().
+# builders directly. The MCP_* variables are already exported by setup().
 _source_sdk() {
-    export MCP_CONFIG_FILE="${BATS_TEST_TMPDIR}/config.json"
-    export MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
 }
 

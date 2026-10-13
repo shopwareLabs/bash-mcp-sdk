@@ -15,13 +15,14 @@ CANCELLATION_SERVER="${REPO_ROOT}/tests/fixtures/cancellation_server.sh"
 
 setup() {
     # Keep the fixture's log out of mktemp's directory and inside the test's.
-    export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
+    # The fixture exports its own config and tools list over these two paths.
+    mcp_test_env "${REPO_ROOT}/tests/fixtures/cancellation_config.json" \
+        "${REPO_ROOT}/tests/fixtures/cancellation_tools_list.json"
     mcp_start_server "${CANCELLATION_SERVER}"
 }
 
 teardown() {
     mcp_stop_server
-    unset MCP_LOG_FILE
 }
 
 @test "mcp_start_server: the server answers initialize with the request id" {

@@ -21,19 +21,10 @@ load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
 load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 
 setup() {
-    MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    MCP_EXTRA_LOG_FILE=""
-    MCP_CONFIG_FILE="/dev/null"
-    MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
-    PROJECT_ROOT="${BATS_TEST_TMPDIR}"
-    export MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT
+    mcp_test_env /dev/null "${BATS_TEST_TMPDIR}/tools.json"
 
     # shellcheck source=../lib/mcpserver_core.sh
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
-}
-
-teardown() {
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT
 }
 
 # Write an executable script named <name> into a directory placed first on

@@ -24,13 +24,14 @@ JSON
 {"tools": []}
 JSON
 
-    export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
+    mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
+    # The log exists and is empty, so the case that asserts a line is absent
+    # fails on a missing line, not on a missing file.
     : > "${MCP_LOG_FILE}"
 }
 
 teardown() {
     mcp_stop_server
-    unset MCP_LOG_FILE
 }
 
 # Print the number of entries directly under <dir>. Every temp file a server

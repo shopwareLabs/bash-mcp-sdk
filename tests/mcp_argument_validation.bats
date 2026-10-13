@@ -20,12 +20,7 @@ bats_require_minimum_version 1.11.0
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
 
 setup() {
-    MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    MCP_EXTRA_LOG_FILE=""
-    MCP_CONFIG_FILE="/dev/null"
-    MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
-    PROJECT_ROOT="${BATS_TEST_TMPDIR}"
-    export MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT
+    mcp_test_env /dev/null "${BATS_TEST_TMPDIR}/tools.json"
 
     # Fixture tool list:
     #   strict — required:[number], additionalProperties:false, repo/mode carry enums
@@ -247,10 +242,6 @@ JSON
     tool_loose() { printf 'DISPATCHED:%s\n' "$1"; }
     tool_typed() { printf 'DISPATCHED:%s\n' "$1"; }
     tool_ranged() { printf 'DISPATCHED:%s\n' "$1"; }
-}
-
-teardown() {
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT
 }
 
 # --- validate_tool_arguments: direct unit behavior ---

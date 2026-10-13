@@ -22,13 +22,11 @@ JSON
 {"tools": [{"name": "protocol_write", "description": "writes to the protocol descriptor", "inputSchema": {"type": "object"}}]}
 JSON
 
-    export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    : > "${MCP_LOG_FILE}"
+    mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
 }
 
 teardown() {
     mcp_stop_server
-    unset MCP_LOG_FILE
 }
 
 @test "a line a server script echoes before run_mcp_server goes to stderr, not the protocol stream" {

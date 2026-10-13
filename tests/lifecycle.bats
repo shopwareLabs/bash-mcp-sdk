@@ -34,7 +34,9 @@ _mcp_wait_for_line() {
 }
 
 setup() {
-    export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
+    # The fixture exports its own config and tools list over these two paths.
+    mcp_test_env "${REPO_ROOT}/tests/fixtures/cancellation_config.json" \
+        "${REPO_ROOT}/tests/fixtures/cancellation_tools_list.json"
     export SLOW_MARKER_FILE="${BATS_TEST_TMPDIR}/slow.marker"
     export CHILD_PID_FILE="${BATS_TEST_TMPDIR}/child.pid"
     export GRANDCHILD_PID_FILE="${BATS_TEST_TMPDIR}/grandchild.pid"
@@ -42,7 +44,7 @@ setup() {
 
 teardown() {
     mcp_stop_server
-    unset MCP_LOG_FILE SLOW_MARKER_FILE CHILD_PID_FILE GRANDCHILD_PID_FILE \
+    unset SLOW_MARKER_FILE CHILD_PID_FILE GRANDCHILD_PID_FILE \
         SLOW_SECS TOOL_SLEEP_PID_FILE MCP_SERVER_PGID TMPDIR CANCEL_HOOK_FILE _MCP_INFLIGHT_FILE \
         MCP_SERVER_INSTANCE
 }

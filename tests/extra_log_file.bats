@@ -12,18 +12,12 @@ load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 setup() {
-    MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    MCP_EXTRA_LOG_FILE=""
-    PROJECT_ROOT="${BATS_TEST_TMPDIR}"
-    MCP_CONFIG_FILE="/dev/null"
-    MCP_TOOLS_LIST_FILE="/dev/null"
-    export MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE
+    mcp_test_env /dev/null /dev/null
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
 }
 
 teardown() {
     mcp_stop_server
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE MCP_LOG_STDERR
 }
 
 # --- _configure_extra_log_file ---

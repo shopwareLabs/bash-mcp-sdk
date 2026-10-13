@@ -23,17 +23,8 @@ load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
 load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 
 setup() {
-    MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    MCP_EXTRA_LOG_FILE=""
-    PROJECT_ROOT="${BATS_TEST_TMPDIR}"
-    MCP_CONFIG_FILE="${BATS_TEST_TMPDIR}/config.json"
-    MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
-    export MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE
+    mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
-}
-
-teardown() {
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE
 }
 
 _initialize_request() {

@@ -14,8 +14,8 @@ load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
 CORE_SH="${REPO_ROOT}/lib/mcpserver_core.sh"
 
 setup() {
-    export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    : > "${MCP_LOG_FILE}"
+    # The loop reads no request, so neither file is opened.
+    mcp_test_env /dev/null /dev/null
 }
 
 @test "run_mcp_server isolated in a subshell leaves the caller's EXIT trap armed" {

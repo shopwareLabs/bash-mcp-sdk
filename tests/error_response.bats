@@ -9,17 +9,8 @@ bats_require_minimum_version 1.11.0
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
 
 setup() {
-    MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    MCP_EXTRA_LOG_FILE=""
-    PROJECT_ROOT="${BATS_TEST_TMPDIR}"
-    MCP_CONFIG_FILE="/dev/null"
-    MCP_TOOLS_LIST_FILE="/dev/null"
-    export MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE
+    mcp_test_env /dev/null /dev/null
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
-}
-
-teardown() {
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE
 }
 
 # --- create_error_response ---

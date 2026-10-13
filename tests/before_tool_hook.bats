@@ -52,12 +52,7 @@ load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 setup() {
-    MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    MCP_EXTRA_LOG_FILE=""
-    MCP_CONFIG_FILE="${BATS_TEST_TMPDIR}/config.json"
-    MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
-    PROJECT_ROOT="${BATS_TEST_TMPDIR}"
-    export MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT
+    mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
 
     printf '%s\n' '{}' > "${MCP_CONFIG_FILE}"
     printf '%s\n' '{
@@ -74,8 +69,7 @@ setup() {
 
 teardown() {
     mcp_stop_server
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT \
-        HOOK_SLEEP_PID_FILE TOOL_MARKER MCP_SERVER_INSTANCE
+    unset HOOK_SLEEP_PID_FILE TOOL_MARKER MCP_SERVER_INSTANCE
 }
 
 # --- no hook ---

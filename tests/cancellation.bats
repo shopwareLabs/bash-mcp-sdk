@@ -52,7 +52,7 @@ CANCELLATION_SERVER="${REPO_ROOT}/tests/fixtures/cancellation_server.sh"
 setup() {
     # Keep the fixture's log inside the test's temp dir, and point the knobs the
     # fixture reads at fresh paths under it.
-    export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
+    mcp_test_env /dev/null "${BATS_TEST_TMPDIR}/tools.json"
     export SLOW_MARKER_FILE="${BATS_TEST_TMPDIR}/slow.marker"
     export CHILD_PID_FILE="${BATS_TEST_TMPDIR}/child.pid"
     export CANCEL_HOOK_FILE="${BATS_TEST_TMPDIR}/cancel-hook.json"
@@ -64,7 +64,6 @@ setup() {
     # inputSchema the call is validated against, and an entry without one
     # answers an isError result instead. The fixture server overrides this with
     # its own list, so only the direct calls see it.
-    export MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
     printf '%s\n' '{
         "tools": [
             {"name": "null_id_call", "inputSchema": {"type": "object"}},
@@ -78,8 +77,7 @@ setup() {
 
 teardown() {
     mcp_stop_server
-    unset MCP_LOG_FILE SLOW_MARKER_FILE CHILD_PID_FILE CANCEL_HOOK_FILE \
-        HOOK_CHILD_PID_FILE MCP_TOOLS_LIST_FILE SLOW_SECS
+    unset SLOW_MARKER_FILE CHILD_PID_FILE CANCEL_HOOK_FILE HOOK_CHILD_PID_FILE SLOW_SECS
 }
 
 @test "cancelling an in-flight call kills the tool and its child, and emits no response" {

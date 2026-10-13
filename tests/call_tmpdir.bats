@@ -34,13 +34,9 @@ load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 setup() {
-    MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    MCP_EXTRA_LOG_FILE=""
-    MCP_CONFIG_FILE="${BATS_TEST_TMPDIR}/config.json"
-    MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
-    PROJECT_ROOT="${BATS_TEST_TMPDIR}"
+    mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
     TMPDIR="${BATS_TEST_TMPDIR}/tmp"
-    export MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT TMPDIR
+    export TMPDIR
     mkdir -p "${TMPDIR}"
 
     # The files the harness server's tools and hooks write their evidence to.
@@ -97,8 +93,7 @@ teardown() {
     # temp directory fail. A regular file a test put in TMPDIR's place is
     # untouched by this.
     chmod -R u+rwx "${BATS_TEST_TMPDIR}" 2>/dev/null || true
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT \
-        TMPDIR DIR_FILE EXIT_MARKER CANCEL_HOOK_FILE MCP_SERVER_INSTANCE MCP_SERVER_PGID
+    unset TMPDIR DIR_FILE EXIT_MARKER CANCEL_HOOK_FILE MCP_SERVER_INSTANCE MCP_SERVER_PGID
 }
 
 # --- the directory a tool sees ---
