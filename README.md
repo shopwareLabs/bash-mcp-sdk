@@ -41,7 +41,7 @@ There is no install step. Copy `lib/mcpserver_core.sh` into your project and `so
 | `validate_tool_arguments` | Check a call's arguments against the tool's `inputSchema`. Rejects a tool that the tools list does not declare exactly once with a non-null `inputSchema`, whose `inputSchema` uses a keyword the validator does not enforce, or whose `inputSchema` holds a keyword of the wrong type, such as `"required": false`. |
 | `create_response`         | Build a JSON-RPC result envelope.                                     |
 | `create_error_response`   | Build a JSON-RPC error envelope. Optional 4th arg `data` (JSON value) is included when non-empty. |
-| `log`                     | Append to `MCP_LOG_FILE`, and to `MCP_EXTRA_LOG_FILE` when set.       |
+| `log`                     | Append to `MCP_LOG_FILE`, and to `MCP_EXTRA_LOG_FILE` when set. A write that fails leaves the server running and prints `mcp: cannot write log file <path>` to stderr. Newlines and carriage returns in the message are written as `\n` and `\r`. |
 | `read_json_file`          | Read one JSON document from a file. Prints it when it is a JSON object; returns 1 on a missing file or one that does not hold exactly one JSON object. |
 
 Configured by environment variable before sourcing:

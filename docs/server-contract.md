@@ -69,7 +69,7 @@ A tool that exits non-zero returns its combined output as an `isError` result ra
 Tool output that is not valid UTF-8 comes back with replacement characters, and can lose a byte that follows an invalid one.
 
 > [!IMPORTANT]
-> Stdout is the protocol channel. Sourcing the core keeps a private copy of the server's stdout, which `run_mcp_server` writes each response to, and points fd 1 at stderr. Output the server script writes to fd 1 after the `source` line goes to stderr. Output written before the `source` line still reaches the stream and corrupts it. A tool function's stdout becomes the tool result, so everything else a server wants to say goes through `log`. A server that prints a response itself, such as the result of `create_response` or `create_error_response`, no longer reaches the client: the line goes to stderr.
+> Stdout is the protocol channel. Sourcing the core keeps a private copy of the server's stdout, which `run_mcp_server` writes each response to, and points fd 1 at stderr. Output the server script writes to fd 1 after the `source` line goes to stderr. Output written before the `source` line still reaches the stream and corrupts it. A tool function's stdout becomes the tool result, so everything else a server wants to say goes through `log`. `log` writes each message as one line, with a newline or carriage return written as `\n` or `\r`, and a log file it cannot write leaves the server running with a note on stderr. A server that prints a response itself, such as the result of `create_response` or `create_error_response`, no longer reaches the client: the line goes to stderr.
 
 Four properties of tool dispatch to write against:
 

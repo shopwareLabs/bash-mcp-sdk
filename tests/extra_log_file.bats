@@ -1,12 +1,15 @@
 #!/usr/bin/env bats
 # bats file_tags=mcp-core,extra-log
-# Tests the shared mcpserver_core logging surface: _configure_extra_log_file()
-# and log()'s dual write.
+# Tests the shared mcpserver_core logging surface: _configure_extra_log_file(),
+# log()'s dual write, a failed log write that leaves the server running, and
+# the escaping of line breaks in a logged message.
 # Sources lib/mcpserver_core.sh directly. Consumers vendor that file verbatim, so
 # this suite covers the module wherever it is vendored.
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
+load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
+load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 setup() {
     MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
@@ -19,6 +22,7 @@ setup() {
 }
 
 teardown() {
+    mcp_stop_server
     unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE MCP_LOG_STDERR
 }
 
@@ -105,4 +109,118 @@ teardown() {
     run --separate-stderr log "INFO" "no mirror for two"
     assert_success
     [[ -z "$stderr" ]]
+}
+
+# --- a failed log write leaves the server running ---
+
+# Write the server script and the files it reads into BATS_TEST_TMPDIR; the
+# body on stdin runs between `source` and `run_mcp_server`.
+_write_logging_server() {
+    printf '{}\n' > "${BATS_TEST_TMPDIR}/config.json"
+    printf '{"tools": []}\n' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_server "${BATS_TEST_TMPDIR}/server.sh"
+}
+
+# Feed two pings to the server script, then EOF, and capture stdout and stderr.
+_run_two_pings() {
+    local input="${BATS_TEST_TMPDIR}/input.jsonl"
+    {
+        jq -nc '{jsonrpc: "2.0", id: 1, method: "ping"}'
+        jq -nc '{jsonrpc: "2.0", id: 2, method: "ping"}'
+    } > "$input"
+    run --separate-stderr "${BATS_TEST_TMPDIR}/server.sh" < "$input"
+}
+
+@test "log: an unwritable MCP_LOG_FILE leaves the server answering and exiting 0" {
+    local missing="${BATS_TEST_TMPDIR}/no-such-dir/server.log"
+    _write_logging_server <<BODY
+export MCP_LOG_FILE="${missing}"
+BODY
+    _run_two_pings
+    assert_equal "$status" 0
+    assert_equal "$(printf '%s\n' "$output" | jq -c '.id' | paste -sd, -)" "1,2"
+    [[ "$stderr" == *"mcp: cannot write log file ${missing}"* ]]
+    [[ "$stderr" != *"No such file or directory"* ]]
+}
+
+@test "log: an unwritable MCP_EXTRA_LOG_FILE leaves the server answering and exiting 0" {
+    local missing="${BATS_TEST_TMPDIR}/no-such-dir/extra.log"
+    _write_logging_server <<BODY
+export MCP_EXTRA_LOG_FILE="${missing}"
+BODY
+    _run_two_pings
+    assert_equal "$status" 0
+    assert_equal "$(printf '%s\n' "$output" | jq -c '.id' | paste -sd, -)" "1,2"
+    [[ "$stderr" == *"mcp: cannot write log file ${missing}"* ]]
+    [[ "$stderr" != *"No such file or directory"* ]]
+    run grep -c '\[INFO\]' "${BATS_TEST_TMPDIR}/server.log"
+    assert_success
+}
+
+@test "log: a log file that becomes unwritable mid-run does not stop the server" {
+    _write_logging_server <<'BODY'
+BODY
+    : > "${BATS_TEST_TMPDIR}/server.log"
+    mcp_start_server "${BATS_TEST_TMPDIR}/server.sh"
+
+    mcp_send "$(jq -nc '{jsonrpc: "2.0", id: 1, method: "initialize", params: {}}')"
+    run mcp_wait_for_response 1
+    assert_success
+    # A directory in the file's place fails the append for root too, where chmod 444 would not.
+    rm "${BATS_TEST_TMPDIR}/server.log"
+    mkdir "${BATS_TEST_TMPDIR}/server.log"
+
+    mcp_send "$(jq -nc '{jsonrpc: "2.0", id: 2, method: "ping"}')"
+    run mcp_wait_for_response 2
+    assert_success
+    mcp_close_stdin
+    local server_status=0
+    wait "${MCP_SERVER_PID}" || server_status=$?
+    assert_equal "$server_status" 0
+    run grep -F "mcp: cannot write log file ${BATS_TEST_TMPDIR}/server.log" "${MCP_SERVER_ERR}"
+    assert_success
+    run grep -F "Is a directory" "${MCP_SERVER_ERR}"
+    assert_equal "$status" 1
+}
+
+@test "log: MCP_LOG_STDERR=1 still mirrors the line when the file write fails" {
+    local missing="${BATS_TEST_TMPDIR}/no-such-dir/server.log"
+    _write_logging_server <<BODY
+export MCP_LOG_FILE="${missing}"
+export MCP_LOG_STDERR=1
+BODY
+    _run_two_pings
+    assert_equal "$status" 0
+    [[ "$stderr" == *"mcp: cannot write log file ${missing}"* ]]
+    [[ "$stderr" != *"No such file or directory"* ]]
+    [[ "$stderr" == *"] [INFO] "* ]]
+}
+
+# --- log() escapes line breaks in the message ---
+
+@test "log: a method with a line break cannot forge a log line" {
+    _write_logging_server <<'BODY'
+BODY
+    local method=$'x\n[2026-10-12 00:00:00] [ERROR] forged entry'
+    jq -nc --arg m "$method" '{jsonrpc: "2.0", id: 1, method: $m}' > "${BATS_TEST_TMPDIR}/input.jsonl"
+    run --separate-stderr "${BATS_TEST_TMPDIR}/server.sh" < "${BATS_TEST_TMPDIR}/input.jsonl"
+    assert_equal "$status" 0
+    run grep -c '^\[2026-10-12 00:00:00\]' "${BATS_TEST_TMPDIR}/server.log"
+    assert_output "0"
+    run grep -F 'Unknown method: x\n[2026-10-12 00:00:00] [ERROR] forged entry' "${BATS_TEST_TMPDIR}/server.log"
+    assert_success
+}
+
+@test "log: a carriage return in the message is written as \\r on one line" {
+    log "INFO" $'a\rb'
+    assert_equal "$(wc -l < "${BATS_TEST_TMPDIR}/server.log" | tr -d ' ')" 1
+    run grep -F 'a\rb' "${BATS_TEST_TMPDIR}/server.log"
+    assert_success
+}
+
+@test "log: a failed write with stderr closed does not end a set -e shell" {
+    run bash -ec 'source "$1"; export MCP_LOG_FILE="$2" MCP_LOG_STDERR=1; log INFO x 2>&-; echo survived' _ \
+        "${REPO_ROOT}/lib/mcpserver_core.sh" "${BATS_TEST_TMPDIR}/no-such-dir/server.log"
+    assert_equal "$status" 0
+    assert_output --partial "survived"
 }
