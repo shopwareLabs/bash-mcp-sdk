@@ -240,3 +240,53 @@ _assert_non_string_method_rejected() {
     run grep -c "Notification method is not a string; dropped" "${MCP_LOG_FILE}"
     assert_output "1"
 }
+
+# --- process_request: a name, method or jsonrpc that does not survive capture ---
+
+# Captured with `$(... | jq -r ...)`, a name `"echo\n"` lost its newline and ran
+# `tool_echo`, a method `"ping\u0000"` lost its NUL and answered as ping, and a
+# `jsonrpc` of the number 2.0 printed as `2.0` and passed the version check.
+
+@test "process_request: a tool name with a trailing newline or a NUL answers -32602 with the name JSON-encoded and does not run the tool" {
+    local marker="${BATS_TEST_TMPDIR}/echo.ran"
+    printf '%s\n' '{"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}' > "${MCP_TOOLS_LIST_FILE}"
+    tool_echo() { : > "${marker}"; }
+    local name request
+    # Each name is held as JSON text, because a bash variable cannot hold a NUL.
+    for name in '"echo\n"' '"\u0000echo"'; do
+        request=$(jq -nc --argjson n "${name}" '{jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: $n, arguments: {}}}')
+
+        run --separate-stderr process_request "${request}"
+
+        assert_success
+        run jq -e --argjson n "${name}" '.id == 1 and .error.code == -32602 and .error.message == "Invalid tool name: \($n | tojson)" and (.result == null)' <<< "${output}"
+        assert_success
+        assert [ ! -e "${marker}" ]
+    done
+}
+
+@test "process_request: a method with a NUL or a trailing newline answers -32601 with the method JSON-encoded and is not answered as ping" {
+    local method request
+    for method in '"ping\u0000"' '"ping\n"'; do
+        request=$(jq -nc --argjson m "${method}" '{jsonrpc: "2.0", id: 1, method: $m}')
+
+        run --separate-stderr process_request "${request}"
+
+        assert_success
+        run jq -e --argjson m "${method}" '.id == 1 and .error.code == -32601 and .error.message == "Method not found: \($m | tojson)" and (.result == null)' <<< "${output}"
+        assert_success
+    done
+}
+
+@test "process_request: a jsonrpc of the number 2.0 or of \"2.0\\n\" answers -32600 jsonrpc must be 2.0" {
+    local request
+    for request in \
+        '{"jsonrpc": 2.0, "id": 1, "method": "ping"}' \
+        '{"jsonrpc": "2.0\n", "id": 1, "method": "ping"}'; do
+        run --separate-stderr process_request "${request}"
+
+        assert_success
+        run jq -e '.id == 1 and .error.code == -32600 and .error.message == "Invalid Request: jsonrpc must be 2.0" and (.result == null)' <<< "${output}"
+        assert_success
+    done
+}

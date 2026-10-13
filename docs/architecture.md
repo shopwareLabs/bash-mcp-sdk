@@ -14,7 +14,7 @@ This document owns the cross-function runtime design of `lib/mcpserver_core.sh`.
 |---|---|---|
 | Parse | `jq -cs 'length'` over the line, which must be `1` | `-32700 Parse error`, null id |
 | Object | the document's `type` is `object` | `-32600 Invalid Request`, null id |
-| Version | `.jsonrpc` equals `2.0` | `-32600`, reflecting a valid id and null otherwise |
+| Version | `.jsonrpc` is the JSON string `"2.0"` | `-32600`, reflecting a valid id and null otherwise |
 | Id type | the id is a JSON string or an integer | `-32600`, null id |
 | Method | `.method` is a JSON string | `-32600 Invalid Request: method must be a string`, reflecting the id |
 

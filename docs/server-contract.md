@@ -32,7 +32,7 @@ A request must be a single JSON object on a line of its own. A line that holds m
 
 A request whose `method` is absent or is not a string is answered `-32600 Invalid Request: method must be a string`, echoing its `id`. A request whose `id` is also invalid gets the `id` answer above instead. A notification whose `method` is absent or not a string gets no response; the server logs it and drops it.
 
-Only an absent `params` is read as `{}`. A present `params` reaches the method's handler as sent, so a `tools/call` whose `params` is `null`, `false` or any other non-object is answered `-32602 Invalid params: expected an object`. A `tools/call` whose `name` is absent or is not a string is answered `-32602 Invalid params: name must be a string`. A string `name` that is not an identifier is answered `-32602 Invalid tool name: <name>`.
+Only an absent `params` is read as `{}`. A present `params` reaches the method's handler as sent, so a `tools/call` whose `params` is `null`, `false` or any other non-object is answered `-32602 Invalid params: expected an object`. A `tools/call` whose `name` is absent or is not a string is answered `-32602 Invalid params: name must be a string`. A string `name` that is not an identifier is answered `-32602 Invalid tool name: <name>`, with a name that ends in a newline or holds a NUL shown JSON-encoded.
 
 ## Tool functions
 
