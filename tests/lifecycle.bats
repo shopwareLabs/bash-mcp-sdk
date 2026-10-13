@@ -512,7 +512,7 @@ teardown() {
     run mcp_start_server "$(type -P true)"
 
     assert_failure
-    assert_output --partial 'exited within 0.2s'
+    assert_output --partial 'exited during startup'
 }
 
 @test "a tombstone in-flight record releases the call's files without signalling" {
