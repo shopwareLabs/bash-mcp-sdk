@@ -830,8 +830,12 @@ handle_tools_call() {
         return
     fi
 
+    # A name that command substitution would alter (a trailing newline, or a
+    # NUL that bash drops) is printed JSON-encoded instead: the quote
+    # characters make it fail the identifier regex below, which an altered
+    # name such as `echo` from `"echo\n"` would pass.
     local tool_name
-    tool_name=$(echo "$params" | jq -r '.name')
+    tool_name=$(echo "$params" | jq -r '.name | if (explode | any(. == 0)) or endswith("\n") then tojson else . end')
 
     # `.arguments // {}` would substitute {} for a present `null` or `false`,
     # because jq's `//` treats both as absent — the validator's non-object
@@ -1700,7 +1704,10 @@ process_request() {
     fi
 
     local jsonrpc id id_is_valid method method_is_string params
-    jsonrpc=$(echo "$request" | jq -r '.jsonrpc // ""')
+    # Read as JSON text and compared against `"2.0"` below: `jq -r` would print
+    # the number 2.0 as `2.0`, and command substitution would strip a newline
+    # from `"2.0\n"`, so either would pass a comparison against the bare string.
+    jsonrpc=$(echo "$request" | jq -c '.jsonrpc')
     # The id is read by key presence, not with `//`: that operator maps an
     # absent key and a present null to the same output, so a request carrying
     # `"id": null` was indistinguishable from a notification. `tojson` keeps
@@ -1712,7 +1719,9 @@ process_request() {
     # `true` as a name. The verdict is kept apart from the name, because an
     # empty string is a string method that no handler answers.
     method_is_string=$(echo "$request" | jq -r '(.method | type) == "string"')
-    method=$(echo "$request" | jq -r 'if (.method | type) == "string" then .method else "" end')
+    # A method command substitution would alter is printed JSON-encoded, so it
+    # matches no handler, as in handle_tools_call's name read.
+    method=$(echo "$request" | jq -r 'if (.method | type) == "string" then (.method | if (explode | any(. == 0)) or endswith("\n") then tojson else . end) else "" end')
     # Only an absent params defaults to {}: `//` would substitute it for a
     # present `null` or `false`, and handle_tools_call's object gate would
     # then never see either.
@@ -1746,7 +1755,7 @@ process_request() {
         id_is_valid=1
     fi
 
-    if [[ "$jsonrpc" != "2.0" ]]; then
+    if [[ "$jsonrpc" != '"2.0"' ]]; then
         log "ERROR" "Invalid JSON-RPC version: $jsonrpc"
         # This arm runs ahead of the id-type gate, so it settles the response
         # id itself: a string or integer is reflected, and the absent sentinel,
