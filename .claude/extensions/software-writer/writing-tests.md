@@ -3,16 +3,17 @@
 - `project.stacks` =
   | Stack | Where | Toolchain |
   |---|---|---|
-  | bash | `lib/mcpserver_core.sh`, `tests/**/*.bats`, `tests/test_helper/*.bash`, `.github/scripts/` | bash 4.0+ for the SDK and its tests; bash 3.2+ for `.github/scripts/` (runs on stock macOS); `jq`; ShellCheck v0.11.0 pinned in CI |
+  | bash | `lib/mcpserver_core.sh`, `tests/**/*.bats`, `tests/test_helper/*.bash`, `scripts/`, `.github/scripts/` | bash 4.1+ for the SDK and its tests, enforced by the pre-flight guard when the file is sourced; bash 3.2+ for `.github/scripts/` and for the guard block itself (both run on stock macOS); `jq` 1.7+; ShellCheck v0.11.0 pinned in CI |
 
   No other stack is in play. The whole product is one bash file; everything else in the tree tests or ships it.
 - `tests.frameworks` =
   | Stack | Framework | Test files | Run |
   |---|---|---|---|
-  | bash | BATS — bats-core 1.13.0, bats-support 0.3.0, bats-assert 2.2.4; every file declares `bats_require_minimum_version 1.11.0` | `tests/*.bats` | `./.github/scripts/setup-bats.sh` once, then `.bats/bats-core/bin/bats -r tests/`; CI runs `bats --timing -r tests/` in distro containers through `scripts/test-linux.sh` |
+  | bash | BATS — bats-core 1.13.0, bats-support 0.3.0, bats-assert 2.2.4; every file declares `bats_require_minimum_version 1.11.0` | `tests/*.bats` | `./.github/scripts/setup-bats.sh` once, then `.bats/bats-core/bin/bats -r tests/`; CI runs `bats --timing -r tests/` in distro containers through `scripts/test-linux.sh`; those containers run as root (`docker/alpine.Dockerfile` and `docker/debian.Dockerfile` set no `USER`), so a failure built from permission bits does not fail there |
 - `tests.fixture_sources` =
   - `tests/test_helper/common_setup.bash` — resolves `REPO_ROOT` by walking up from `BATS_TEST_DIRNAME` to the directory containing `.bats/`, then loads bats-support and bats-assert. `setup-bats.sh` must have run first: without `.bats/` the walk reaches `/` and every load fails from there.
-  - Throwaway servers built in `setup()`: a `tools.json` and a `server.sh` heredoc in `BATS_TEST_TMPDIR` that exports the `MCP_*` variables, sources `${REPO_ROOT}/lib/mcpserver_core.sh`, and defines its `tool_<name>` functions — see `tests/core_standalone.bats` for the shape.
+  - `tests/test_helper/write_server.bash` — `write_server <path>` writes a throwaway server script from a stdin body: shebang, `set -euo pipefail`, the `MCP_*` exports (defaulting to `config.json`, `tools.json` and `server.log` in `BATS_TEST_TMPDIR`; a suite's `setup()` writes the first two), the `source` line, the body, and `run_mcp_server`. See `tests/core_standalone.bats` for the shape. `tests/fixtures/cancellation_server.sh` stays a static fixture.
+  - `tests/test_helper/mcp_client.bash` — `mcp_start_server` starts a server on a FIFO and returns once it answers a ping; `mcp_send`, `mcp_wait_for_response`, `mcp_assert_no_response` and `mcp_stop_server` drive it. Call `run_mcp_server` only in such a server script or in a `( … )` subshell, never in the test shell: it replaces the EXIT trap bats reports through, so bats misreports the test (a spurious `not ok` at the `run_mcp_server` line, or a test-count mismatch).
 
 ## Pre-Step-1
 
