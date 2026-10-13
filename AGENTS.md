@@ -30,7 +30,7 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 | `tests/error_response.bats` | Pins the error envelope builder, including its optional `data` argument |
 | `tests/large_payloads.bats` | Pins that data past the OS argument limit is answered: a tool's output on the success, failure and before-tool-hook paths and in multibyte text straddling a read boundary, `arguments` the schema accepts or rejects, a tools list and a tool schema, and a server configuration, each over 1 MB, plus `create_response` and `create_error_response` building 1.1 MB exactly and exiting 5 with nothing on stdout for a result, or a non-empty data, that is not one JSON document |
 | `tests/read_json_file.bats` | Pins `read_json_file`: one JSON object per file, and the `-32603` each handler answers with when its configuration file is missing, empty, multi-document, unparseable, or holds a document that is not a JSON object |
-| `tests/extra_log_file.bats` | Pins the logging surface (`log`, `_configure_extra_log_file`) |
+| `tests/extra_log_file.bats` | Pins the logging surface (`log`, `_configure_extra_log_file`), including that a failed log-file write leaves the server answering with a stderr note, and that newlines and carriage returns in a logged message are escaped |
 | `tests/cancellation.bats` | Pins cancellation: the in-flight kill, the absent response, ignored cancellations, the cancel hook, tool stdin, and the EOF drain |
 | `tests/lifecycle.bats` | Pins server teardown: group and pid signals, the SIGKILL sentinel, and that no tool process outlives the server |
 | `tests/client_harness.bats` | Pins the FIFO client harness: start a server, send one line, wait for a response, assert silence, tear down |

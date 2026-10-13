@@ -236,10 +236,17 @@ log() {
     local level="$1"
     local message="$2"
     local line
+    local esc_lf='\n' esc_cr='\r'
+    message="${message//$'\n'/$esc_lf}"
+    message="${message//$'\r'/$esc_cr}"
     line="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message"
-    echo "$line" >> "$MCP_LOG_FILE"
-    [[ -n "${MCP_EXTRA_LOG_FILE}" ]] && echo "$line" >> "$MCP_EXTRA_LOG_FILE"
-    [[ "${MCP_LOG_STDERR}" == "1" ]] && printf '%s\n' "$line" >&2
+    { printf '%s\n' "$line" >> "$MCP_LOG_FILE"; } 2>/dev/null || printf 'mcp: cannot write log file %s\n' "$MCP_LOG_FILE" >&2 || true
+    if [[ -n "${MCP_EXTRA_LOG_FILE}" ]]; then
+        { printf '%s\n' "$line" >> "$MCP_EXTRA_LOG_FILE"; } 2>/dev/null || printf 'mcp: cannot write log file %s\n' "$MCP_EXTRA_LOG_FILE" >&2 || true
+    fi
+    if [[ "${MCP_LOG_STDERR}" == "1" ]]; then
+        printf '%s\n' "$line" >&2 || true
+    fi
     return 0
 }
 
