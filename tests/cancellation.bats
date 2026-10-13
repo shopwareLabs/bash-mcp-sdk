@@ -49,59 +49,6 @@ load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 
 CANCELLATION_SERVER="${REPO_ROOT}/tests/fixtures/cancellation_server.sh"
 
-# Wait up to <secs> (default 5) for <file> to hold something. The fixture tools
-# publish their markers and pids from the server process, so a test waits for
-# the evidence that the call is genuinely in flight before acting on it.
-_mcp_wait_for_file() {
-    local file="$1"
-    local limit="${2:-5}"
-    local deadline=$(( SECONDS + limit ))
-    while (( SECONDS < deadline )); do
-        if [[ -s "${file}" ]]; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
-# Wait up to <secs> (default 5) for process <pid> to be gone. A process this
-# shell has already reaped has no ps entry; one that exited but has not been
-# reaped yet shows state Z. Either way it is no longer running.
-_mcp_wait_for_exit() {
-    local pid="$1"
-    local limit="${2:-5}"
-    local deadline=$(( SECONDS + limit ))
-    local state=""
-    while (( SECONDS < deadline )); do
-        state="$(_mcp_proc_state "${pid}")"
-        if [[ -z "${state}" || "${state}" == Z* ]]; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
-# Wait up to <tries> polls of 0.05s for the server log to carry a line matching
-# <pattern>. A teardown logs its outcome last, so the line's arrival is when the
-# teardown finished — which is what a timing assertion about the grace period
-# has to measure. The window is counted in polls rather than seconds because
-# SECONDS has one-second granularity and the deadlines here sit well inside a
-# single tick.
-_mcp_wait_for_log_pattern() {
-    local pattern="$1"
-    local tries="${2:-20}"
-    local i
-    for (( i = 0; i < tries; i++ )); do
-        if [[ -f "${MCP_LOG_FILE}" ]] && grep -q -- "${pattern}" "${MCP_LOG_FILE}"; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
 setup() {
     # Keep the fixture's log inside the test's temp dir, and point the knobs the
     # fixture reads at fresh paths under it.
@@ -140,7 +87,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"slow_with_child","arguments":{}}}'
 
-    run _mcp_wait_for_file "${CHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${CHILD_PID_FILE}" 5
     assert_success
     local child_pid
     child_pid="$(<"${CHILD_PID_FILE}")"
@@ -149,12 +96,8 @@ teardown() {
 
     # The child the tool spawned is dead within ~3s of the cancellation, so the
     # teardown reached the whole process group and not just the tool.
-    local deadline=$(( SECONDS + 3 ))
-    while (( SECONDS < deadline )) && kill -0 "${child_pid}" 2>/dev/null; do
-        sleep 0.1
-    done
-    run kill -0 "${child_pid}"
-    assert_failure
+    run mcp_wait_for_exit "${child_pid}" 3
+    assert_success
 
     run mcp_assert_no_response 101 1
     assert_success
@@ -172,7 +115,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":201,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":999}}'
@@ -478,7 +421,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":401,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","id":402,"method":"ping"}'
@@ -502,7 +445,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":451,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","id":452,"method":"ping"}'
@@ -529,7 +472,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":1001,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # A second call arrives while the first runs, so the dispatch queues it.
@@ -543,7 +486,7 @@ teardown() {
     # writes is held until that dispatch returns, so the response for 1001 only
     # arrives once the replayed call is over — this wait is what puts the bytes
     # below inside it.
-    run _mcp_wait_for_file "${CHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${CHILD_PID_FILE}" 5
     assert_success
 
     # The bytes that complete the pending fragment arrive while the replayed call
@@ -583,7 +526,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":461,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     printf '%s' '{"jsonrpc":"2.0","id":462,"method":"pi' >&"${MCP_CLIENT_FD}"
@@ -603,7 +546,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":471,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","id":472,"method":"notifications/cancelled","params":{"requestId":471}}'
@@ -620,7 +563,7 @@ teardown() {
 
     export SLOW_SECS=2
     mcp_send '{"jsonrpc":"2.0","id":473,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
     mcp_send '{"method":"notifications/cancelled","params":{"requestId":473}}'
 
@@ -639,7 +582,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"7"}}'
 
@@ -660,7 +603,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":501,"method":"tools/call","params":{"name":"stubborn","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":501}}'
@@ -700,7 +643,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":801,"method":"tools/call","params":{"name":"stubborn","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":801}}'
@@ -708,7 +651,7 @@ teardown() {
     # The fallback measures the group's raw liveness, so the sentinel holds the
     # grace open for its whole two seconds and the escalation is what ends the
     # tool — well before the eight seconds the tool would otherwise run.
-    run _mcp_wait_for_log_pattern 'ignored SIGTERM; process group killed' 80
+    run mcp_wait_for_log regex 'ignored SIGTERM; process group killed' 4
     assert_success
     run mcp_assert_no_response 801 1
     assert_success
@@ -723,12 +666,12 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":601,"method":"tools/call","params":{"name":"hooked","arguments":{"alpha":1,"beta":"two"}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":601}}'
 
-    run _mcp_wait_for_file "${CANCEL_HOOK_FILE}" 5
+    run mcp_wait_for_file "${CANCEL_HOOK_FILE}" 5
     assert_success
     run jq -e '.alpha == 1 and .beta == "two"' "${CANCEL_HOOK_FILE}"
     assert_success
@@ -739,15 +682,15 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":611,"method":"tools/call","params":{"name":"hooked_child","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":611}}'
 
-    run _mcp_wait_for_file "${HOOK_CHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${HOOK_CHILD_PID_FILE}" 5
     assert_success
     local hook_child_pid
     hook_child_pid="$(<"${HOOK_CHILD_PID_FILE}")"
-    run _mcp_wait_for_exit "${hook_child_pid}" 5
+    run mcp_wait_for_exit "${hook_child_pid}" 5
     assert_success
     run mcp_assert_no_response 611 1
     assert_success
@@ -757,7 +700,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":621,"method":"tools/call","params":{"name":"term_wrapper_stubborn_child","arguments":{}}}'
 
-    run _mcp_wait_for_file "${CHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${CHILD_PID_FILE}" 5
     assert_success
     local child_pid
     child_pid="$(<"${CHILD_PID_FILE}")"
@@ -766,7 +709,7 @@ teardown() {
     sleep 1
     run kill -0 "${child_pid}"
     assert_success
-    run _mcp_wait_for_exit "${child_pid}" 3
+    run mcp_wait_for_exit "${child_pid}" 3
     assert_success
     run mcp_assert_no_response 621 1
     assert_success
@@ -784,12 +727,12 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":641,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":641}}'
 
-    run _mcp_wait_for_log_pattern 'Cancelled tools/call 641' 20
+    run mcp_wait_for_log regex 'Cancelled tools/call 641' 1
     assert_success
 
     run mcp_assert_no_response 641 1
@@ -857,7 +800,7 @@ teardown() {
     # so the server is still here and still answering requests. Its liveness is
     # asserted before the write below: a server that has already stopped leaves
     # the write below to die on a broken pipe instead of failing here.
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 1
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 1
     assert_failure
     mcp_send '{"jsonrpc":"2.0","id":1102,"method":"ping"}'
     run mcp_wait_for_response 1102 5
@@ -866,10 +809,10 @@ teardown() {
     # And a later call is still cancellable: the outer call left the in-flight
     # machinery able to name and stop a tool group.
     mcp_send '{"jsonrpc":"2.0","id":1103,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1103}}'
-    run _mcp_wait_for_log_pattern 'Cancelled tools/call 1103' 20
+    run mcp_wait_for_log regex 'Cancelled tools/call 1103' 1
     assert_success
     run mcp_assert_no_response 1103 1
     assert_success
@@ -880,7 +823,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":801,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # A read that times out on a partial line consumes those bytes from the
@@ -925,7 +868,7 @@ teardown() {
     assert_output "slow done"
 
     # Nothing more can be answered, so the server stops by itself.
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
 }
 
@@ -953,7 +896,7 @@ teardown() {
     run grep -c '913' "${MCP_LOG_FILE}"
     assert_output "0"
 
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
 }
 
@@ -967,7 +910,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":1201,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # No trailing newline, and the stream closes behind it, so nothing can ever
@@ -992,7 +935,7 @@ teardown() {
     run grep -c 'Discarding a partial line' "${MCP_LOG_FILE}"
     assert_output "0"
 
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
 }
 
@@ -1005,7 +948,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":1211,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # The wait outlasts SLOW_SECS, so the tool ends with these bytes still in
@@ -1026,7 +969,7 @@ teardown() {
     run grep -c 'Discarding a partial line' "${MCP_LOG_FILE}"
     assert_output "0"
 
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
 }
 
@@ -1040,7 +983,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":921,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # The wait outlasts the poll loop's read window (0.05s in _await_tool_call),
@@ -1074,7 +1017,7 @@ teardown() {
     # The response was owed to a client that is gone, so the dispatch is
     # finished: the server stops rather than waiting for a line that can never
     # arrive.
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
 }
 
@@ -1091,7 +1034,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":931,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # Written while the poll loop is running and followed by a wait longer than
@@ -1140,7 +1083,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":941,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # The wait outlasts SLOW_SECS, so the tool ends with the fragment still
@@ -1156,7 +1099,7 @@ teardown() {
     assert_success
     assert_output "slow done"
 
-    run _mcp_wait_for_log_pattern 'Discarding a partial line' 20
+    run mcp_wait_for_log regex 'Discarding a partial line' 1
     assert_success
 
     run mcp_assert_no_response 942 0
@@ -1170,7 +1113,7 @@ teardown() {
     run grep -c '942' "${MCP_LOG_FILE}"
     assert_output "0"
 
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
 }
 
@@ -1185,7 +1128,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":951,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # The tool ends with the fragment still unterminated, so the dispatch hands
@@ -1225,7 +1168,7 @@ teardown() {
     run grep -c -- '"error"' "${MCP_SERVER_OUT}"
     assert_output "0"
 
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
 }
 
@@ -1238,7 +1181,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":961,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     printf '%s' '{"jsonrpc":"2.0","id":962,"method":"pi' >&"${MCP_CLIENT_FD}"
@@ -1268,7 +1211,7 @@ teardown() {
     run grep -c -- '"error"' "${MCP_SERVER_OUT}"
     assert_output "0"
 
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
 }
 
@@ -1283,7 +1226,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":1221,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # The wait outlasts SLOW_SECS, so the tool ends with these bytes still in
@@ -1298,7 +1241,7 @@ teardown() {
     # The fragment is the read loop's last line: it dispatches it, then stops.
     # The exit is what orders that answer ahead of the assertions below, since
     # its id is null and there is no response to poll for.
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
 
     # The fragment parsed, so it was dispatched rather than dropped, and its
@@ -1318,7 +1261,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":1231,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # No trailing newline, and the stream closes behind it while the tool still
@@ -1340,7 +1283,7 @@ teardown() {
     run grep -c 'Discarding a partial line' "${MCP_LOG_FILE}"
     assert_output "0"
 
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
 }
 
@@ -1355,7 +1298,7 @@ teardown() {
     mcp_start_server "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":1241,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # The wait outlasts SLOW_SECS, so the tool ends with these bytes still in
@@ -1370,7 +1313,7 @@ teardown() {
     # The fragment is the read loop's last line: it dispatches it, then stops.
     # The exit is what orders that answer ahead of the assertions below, since
     # its id is null and there is no response to poll for.
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
 
     # The fragment was handed on rather than dropped, and its -32700 answer

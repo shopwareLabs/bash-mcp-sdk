@@ -100,89 +100,6 @@ _assert_result_text() {
     assert_success
 }
 
-# Count the running processes of the server this test started, the way
-# tests/lifecycle.bats counts the fixture's: every subshell the SDK forks keeps
-# the server's argv, so the script path and the per-start instance marker
-# select them all and nothing else.
-_server_procs() {
-    local script="$1"
-    local marker="--mcp-test-instance=${MCP_SERVER_INSTANCE:-}"
-    local line
-    local count=0
-    while IFS= read -r line; do
-        if [[ "${line}" == Z* ]]; then
-            continue
-        fi
-        if [[ "${line}" == *"${script}"* && "${line}" == *"${marker}"* ]]; then
-            count=$(( count + 1 ))
-        fi
-    done < <(ps -A -o stat=,args=)
-    printf '%s' "${count}"
-}
-
-# Wait up to <secs> for <file> to hold something.
-_wait_for_file() {
-    local file="$1"
-    local limit="$2"
-    local deadline=$(( SECONDS + limit ))
-    while (( SECONDS < deadline )); do
-        if [[ -s "${file}" ]]; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
-# Wait up to <secs> for process <pid> to be gone or a zombie.
-_wait_for_exit() {
-    local pid="$1"
-    local limit="$2"
-    local deadline=$(( SECONDS + limit ))
-    local state=""
-    while (( SECONDS < deadline )); do
-        state="$(_mcp_proc_state "${pid}")"
-        if [[ -z "${state}" || "${state}" == Z* ]]; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
-# Wait up to <secs> for exactly <want> processes of server <script>.
-_wait_for_server_procs() {
-    local script="$1"
-    local want="$2"
-    local limit="$3"
-    local deadline=$(( SECONDS + limit ))
-    local count=""
-    while (( SECONDS < deadline )); do
-        count="$(_server_procs "${script}")"
-        if [[ "${count}" == "${want}" ]]; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    printf 'expected %s server process(es), saw %s\n' "${want}" "${count}" >&2
-    return 1
-}
-
-# Count the call roots under <dir>, the way tests/lifecycle.bats counts them: a
-# call root is a directory named `mcp-call.*`, and where a call's root is
-# created is the only place a test can see whether it was removed.
-_count_call_roots() {
-    local dir="$1"
-    local entry
-    local count=0
-    for entry in "${dir}"/*; do
-        if [[ -e "${entry}" && "${entry}" == */mcp-call.* ]]; then
-            count=$(( count + 1 ))
-        fi
-    done
-    printf '%s' "${count}"
-}
-
 # --- no hook ---
 
 @test "process_request: with no hook defined the tool result is the tool's output (guard: unchanged behavior)" {
@@ -269,7 +186,7 @@ _count_call_roots() {
     # answered "ended the call" instead.
     _assert_result_text "${output}" false ""
     assert [ -e "${tool_marker}" ]
-    run _count_call_roots "${TMPDIR}"
+    run mcp_count_call_roots "${TMPDIR}"
     assert_output "0"
 }
 
@@ -885,13 +802,9 @@ BODY
     text="$(jq -r '.result.content[0].text' <<< "${output}")"
     local long_pid
     long_pid="$(<"${long_pid_file}")"
-    local deadline=$(( SECONDS + 3 ))
-    while (( SECONDS < deadline )) && kill -0 "${long_pid}" 2>/dev/null; do
-        sleep 0.1
-    done
-    run kill -0 "${long_pid}"
+    run mcp_wait_for_exit "${long_pid}" 3
     kill "${long_pid}" 2>/dev/null || true
-    assert_failure
+    assert_success
     assert_equal "${text}" "long=${long_pid}"
 }
 
@@ -987,20 +900,20 @@ tool_blocked() {
 BODY
     mcp_start_server "${server}"
     mcp_send "$(_call_request blocked '{}' 41)"
-    run _wait_for_file "${HOOK_SLEEP_PID_FILE}" 5
+    run mcp_wait_for_file "${HOOK_SLEEP_PID_FILE}" 5
     assert_success
     local sleep_pid
     sleep_pid="$(<"${HOOK_SLEEP_PID_FILE}")"
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":41}}'
 
-    run _wait_for_exit "${sleep_pid}" 5
+    run mcp_wait_for_exit "${sleep_pid}" 5
     assert_success
     run mcp_assert_no_response 41 1
     assert_success
     assert [ ! -e "${TOOL_MARKER}" ]
     # Only the server process is left: the wrapper the hook ran in and the
     # sentinel beside it are gone with the call's group.
-    run _wait_for_server_procs "${server}" 1 5
+    run mcp_wait_for_server_procs "${server}" exact 1 5
     assert_success
 }

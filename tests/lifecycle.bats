@@ -18,22 +18,6 @@ load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 CANCELLATION_SERVER="${REPO_ROOT}/tests/fixtures/cancellation_server.sh"
 
-# Wait up to <secs> (default 5) for <file> to hold something. The fixture tools
-# publish their markers and pids from the server process, so a test waits for
-# the evidence that the call is genuinely in flight before acting on it.
-_mcp_wait_for_file() {
-    local file="$1"
-    local limit="${2:-5}"
-    local deadline=$(( SECONDS + limit ))
-    while (( SECONDS < deadline )); do
-        if [[ -s "${file}" ]]; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
 # Wait up to <secs> (default 5) for <file> to carry a line equal to <text>.
 _mcp_wait_for_line() {
     local file="$1"
@@ -46,133 +30,6 @@ _mcp_wait_for_line() {
         fi
         sleep 0.05
     done
-    return 1
-}
-
-# Wait up to <secs> (default 5) for process <pid> to be gone. A process this
-# shell has already reaped has no ps entry; one that exited but has not been
-# reaped yet shows state Z. Either way it is no longer running.
-_mcp_wait_for_exit() {
-    local pid="$1"
-    local limit="${2:-5}"
-    local deadline=$(( SECONDS + limit ))
-    local state=""
-    while (( SECONDS < deadline )); do
-        state="$(_mcp_proc_state "${pid}")"
-        if [[ -z "${state}" || "${state}" == Z* ]]; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
-# Wait up to <tries> polls of 0.05s for the server log to carry a line matching
-# <pattern>. A teardown logs each phase as it reaches it, so the line's arrival
-# is when that phase began — which is what a test that has to act inside a
-# window the teardown holds open has to synchronize on.
-_mcp_wait_for_log_pattern() {
-    local pattern="$1"
-    local tries="${2:-20}"
-    local i
-    for (( i = 0; i < tries; i++ )); do
-        if [[ -f "${MCP_LOG_FILE}" ]] && grep -q -- "${pattern}" "${MCP_LOG_FILE}"; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
-# Count the running processes that belong to the server this test started: those
-# whose command line names the fixture server *and* carries that server's own
-# instance marker. Every subshell the SDK forks for a server — the dispatch
-# subshell, a tool's wrapper, the lifeline sentinel — keeps the server's argv,
-# so one filter accounts for all of them; the marker is what keeps a process
-# from another test or another run, which carries a different one, out of the
-# count. Defunct processes are excluded: a server this shell has killed but not
-# yet reaped is not running any more.
-# The marker is read from the harness, which mints a fresh one per start.
-_mcp_fixture_procs() {
-    local line
-    local count=0
-    local marker="--mcp-test-instance=${MCP_SERVER_INSTANCE:-}"
-    while IFS= read -r line; do
-        if [[ "${line}" == Z* ]]; then
-            continue
-        fi
-        if [[ "${line}" == *"${CANCELLATION_SERVER}"* && "${line}" == *"${marker}"* ]]; then
-            count=$(( count + 1 ))
-        fi
-    done < <(ps -A -o stat=,args=)
-    printf '%s' "${count}"
-}
-
-# Wait up to <secs> (default 5) for exactly <want> fixture processes to remain.
-_mcp_wait_for_proc_count() {
-    local want="$1"
-    local limit="${2:-5}"
-    local deadline=$(( SECONDS + limit ))
-    local count=""
-    while (( SECONDS < deadline )); do
-        count="$(_mcp_fixture_procs)"
-        if [[ "${count}" == "${want}" ]]; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    printf 'expected %s fixture process(es), saw %s\n' "${want}" "${count}" >&2
-    return 1
-}
-
-# Wait up to <secs> (default 5) for at least <want> fixture processes: the shape
-# a test uses to show that the sentinel and the wrapper exist while a call runs,
-# so that their absence afterwards means something.
-_mcp_wait_for_proc_count_at_least() {
-    local want="$1"
-    local limit="${2:-5}"
-    local deadline=$(( SECONDS + limit ))
-    local count=""
-    while (( SECONDS < deadline )); do
-        count="$(_mcp_fixture_procs)"
-        if [[ -n "${count}" ]] && (( count >= want )); then
-            return 0
-        fi
-        sleep 0.1
-    done
-    printf 'expected at least %s fixture process(es), saw %s\n' "${want}" "${count}" >&2
-    return 1
-}
-
-# Wait up to <secs> (default 5) for exactly <want> call roots under TMPDIR. One
-# exists while a call is in flight and holds the call's output file; the SDK
-# names them mcp-call.*, and the path is held only by the dispatch subshell that
-# created it, so the directory is the only place a test can see whether a
-# teardown removed it.
-_mcp_tool_output_files() {
-    local file
-    local count=0
-    for file in "${TMPDIR}"/*; do
-        if [[ -e "${file}" && "${file}" == */mcp-call.* ]]; then
-            count=$(( count + 1 ))
-        fi
-    done
-    printf '%s' "${count}"
-}
-
-_mcp_wait_for_tool_output_count() {
-    local want="$1"
-    local limit="${2:-5}"
-    local deadline=$(( SECONDS + limit ))
-    local count=""
-    while (( SECONDS < deadline )); do
-        count="$(_mcp_tool_output_files)"
-        if [[ "${count}" == "${want}" ]]; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    printf 'expected %s call root(s), saw %s\n' "${want}" "${count}" >&2
     return 1
 }
 
@@ -207,7 +64,7 @@ teardown() {
     set +m
     sleep 0.2
 
-    run _mcp_fixture_procs
+    run mcp_count_server_procs "${CANCELLATION_SERVER}"
     assert_output "1"
 
     run kill -0 -- "-${decoy_pid}"
@@ -221,9 +78,9 @@ teardown() {
     mcp_start_server_isolated "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"spawns_tree","arguments":{}}}'
 
-    run _mcp_wait_for_file "${CHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${CHILD_PID_FILE}" 5
     assert_success
-    run _mcp_wait_for_file "${GRANDCHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${GRANDCHILD_PID_FILE}" 5
     assert_success
     local child_pid grandchild_pid
     child_pid="$(<"${CHILD_PID_FILE}")"
@@ -234,11 +91,11 @@ teardown() {
     # lifeline sentinel is the only thing left that can reach the tool.
     kill -KILL -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
 
-    run _mcp_wait_for_exit "${child_pid}" 3
+    run mcp_wait_for_exit "${child_pid}" 3
     assert_success
-    run _mcp_wait_for_exit "${grandchild_pid}" 3
+    run mcp_wait_for_exit "${grandchild_pid}" 3
     assert_success
-    run _mcp_wait_for_proc_count 0 3
+    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 0 3
     assert_success
 
     # The marker holds the entry line only, so the tool was killed mid-call
@@ -253,9 +110,9 @@ teardown() {
     mcp_start_server_isolated "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":151,"method":"tools/call","params":{"name":"spawns_tree","arguments":{}}}'
 
-    run _mcp_wait_for_file "${CHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${CHILD_PID_FILE}" 5
     assert_success
-    run _mcp_wait_for_file "${GRANDCHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${GRANDCHILD_PID_FILE}" 5
     assert_success
     local child_pid grandchild_pid
     child_pid="$(<"${CHILD_PID_FILE}")"
@@ -263,11 +120,11 @@ teardown() {
 
     kill -KILL "${MCP_SERVER_PID}" 2>/dev/null || true
 
-    run _mcp_wait_for_exit "${child_pid}" 3
+    run mcp_wait_for_exit "${child_pid}" 3
     assert_success
-    run _mcp_wait_for_exit "${grandchild_pid}" 3
+    run mcp_wait_for_exit "${grandchild_pid}" 3
     assert_success
-    run _mcp_wait_for_proc_count 0 3
+    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 0 3
     assert_success
 }
 
@@ -292,14 +149,14 @@ BODY
     mcp_start_server_isolated "${server}"
     mcp_send '{"jsonrpc":"2.0","id":161,"method":"tools/call","params":{"name":"hold","arguments":{}}}'
 
-    run _mcp_wait_for_file "${TOOL_SLEEP_PID_FILE}" 5
+    run mcp_wait_for_file "${TOOL_SLEEP_PID_FILE}" 5
     assert_success
     local sleep_pid
     sleep_pid="$(<"${TOOL_SLEEP_PID_FILE}")"
 
     kill -KILL "${MCP_SERVER_PID}" 2>/dev/null || true
 
-    run _mcp_wait_for_exit "${sleep_pid}" 3
+    run mcp_wait_for_exit "${sleep_pid}" 3
     assert_success
 }
 
@@ -308,7 +165,7 @@ BODY
     mcp_start_server_isolated "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":201,"method":"tools/call","params":{"name":"slow_with_child","arguments":{}}}'
 
-    run _mcp_wait_for_file "${CHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${CHILD_PID_FILE}" 5
     assert_success
     local child_pid
     child_pid="$(<"${CHILD_PID_FILE}")"
@@ -318,11 +175,11 @@ BODY
     # The server and the dispatch subshell die on the signal while the tool is
     # still running, so what stops the tool is the shutdown teardown reaching
     # the group the in-flight file names.
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
-    run _mcp_wait_for_exit "${child_pid}" 5
+    run mcp_wait_for_exit "${child_pid}" 5
     assert_success
-    run _mcp_wait_for_proc_count 0 5
+    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 0 5
     assert_success
 }
 
@@ -331,9 +188,9 @@ BODY
     mcp_start_server_isolated "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"spawns_tree","arguments":{}}}'
 
-    run _mcp_wait_for_file "${CHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${CHILD_PID_FILE}" 5
     assert_success
-    run _mcp_wait_for_file "${GRANDCHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${GRANDCHILD_PID_FILE}" 5
     assert_success
     local child_pid grandchild_pid
     child_pid="$(<"${CHILD_PID_FILE}")"
@@ -348,14 +205,14 @@ BODY
     run _mcp_wait_for_line "${SLOW_MARKER_FILE}" "done" $(( SLOW_SECS + 3 ))
     assert_success
 
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
     # The deferral must not leave the tool group alive once the server is gone.
-    run _mcp_wait_for_exit "${child_pid}" 5
+    run mcp_wait_for_exit "${child_pid}" 5
     assert_success
-    run _mcp_wait_for_exit "${grandchild_pid}" 5
+    run mcp_wait_for_exit "${grandchild_pid}" 5
     assert_success
-    run _mcp_wait_for_proc_count 0 5
+    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 0 5
     assert_success
 }
 
@@ -363,25 +220,25 @@ BODY
     export SLOW_SECS=2
     mcp_start_server_isolated "${CANCELLATION_SERVER}"
 
-    run _mcp_wait_for_proc_count 1 3
+    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 1 3
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","id":401,"method":"tools/call","params":{"name":"slow","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
 
     # While the call runs the server is not alone: the dispatch subshell, the
     # tool's wrapper, and the lifeline sentinel all carry the server's argv.
     # The count is what shows the sentinel is real, so its absence after the
     # call means something.
-    run _mcp_wait_for_proc_count_at_least 4 5
+    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" at-least 4 5
     assert_success
 
     run mcp_wait_for_response 401 6
     assert_success
 
-    run _mcp_wait_for_proc_count 1 5
+    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 1 5
     assert_success
 }
 
@@ -390,14 +247,14 @@ BODY
     mcp_start_server_isolated "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":451,"method":"tools/call","params":{"name":"unawaited_child","arguments":{}}}'
 
-    run _mcp_wait_for_file "${CHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${CHILD_PID_FILE}" 5
     assert_success
     local child_pid
     child_pid="$(<"${CHILD_PID_FILE}")"
 
     run mcp_wait_for_response 451 5
     assert_success
-    run _mcp_wait_for_exit "${child_pid}" 3
+    run mcp_wait_for_exit "${child_pid}" 3
     assert_success
 }
 
@@ -406,9 +263,9 @@ BODY
     mcp_start_server_isolated "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":501,"method":"tools/call","params":{"name":"spawns_tree","arguments":{}}}'
 
-    run _mcp_wait_for_file "${CHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${CHILD_PID_FILE}" 5
     assert_success
-    run _mcp_wait_for_file "${GRANDCHILD_PID_FILE}" 5
+    run mcp_wait_for_file "${GRANDCHILD_PID_FILE}" 5
     assert_success
     local child_pid grandchild_pid
     child_pid="$(<"${CHILD_PID_FILE}")"
@@ -418,9 +275,9 @@ BODY
 
     run mcp_assert_no_response 501 1
     assert_success
-    run _mcp_wait_for_exit "${child_pid}" 3
+    run mcp_wait_for_exit "${child_pid}" 3
     assert_success
-    run _mcp_wait_for_exit "${grandchild_pid}" 3
+    run mcp_wait_for_exit "${grandchild_pid}" 3
     assert_success
 
     # The server survived the cancellation, and the call's group is fully gone
@@ -428,31 +285,7 @@ BODY
     mcp_send '{"jsonrpc":"2.0","id":502,"method":"ping"}'
     run mcp_wait_for_response 502 5
     assert_success
-    run _mcp_wait_for_proc_count 1 5
-    assert_success
-}
-
-@test "a teardown on a catchable signal removes the in-flight call's output file" {
-    # The output file's path exists only in the dispatch subshell that created
-    # it, so a server that goes down on a signal has nothing but its in-flight
-    # record to reach it with. TMPDIR is pointed at a directory of the test's
-    # own to make that file observable at all.
-    export SLOW_SECS=8
-    export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
-    mkdir -p "${TMPDIR}"
-    mcp_start_server_isolated "${CANCELLATION_SERVER}"
-    mcp_send '{"jsonrpc":"2.0","id":601,"method":"tools/call","params":{"name":"slow_with_child","arguments":{}}}'
-
-    run _mcp_wait_for_file "${CHILD_PID_FILE}" 5
-    assert_success
-    run _mcp_wait_for_tool_output_count 1 5
-    assert_success
-
-    kill -TERM -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
-
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
-    assert_success
-    run _mcp_wait_for_tool_output_count 0 5
+    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 1 5
     assert_success
 }
 
@@ -466,9 +299,9 @@ BODY
     mcp_start_server_isolated "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":601,"method":"tools/call","params":{"name":"stubborn","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
-    run _mcp_wait_for_proc_count_at_least 4 5
+    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" at-least 4 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":601}}'
@@ -477,14 +310,14 @@ BODY
     # written on the way into the teardown, just before the group TERM, so
     # waiting on it puts this SIGKILL inside the window that TERM opens rather
     # than at a fixed delay a loaded machine can put on either side of it.
-    run _mcp_wait_for_log_pattern 'Cancelling in-flight tools/call 601' 20
+    run mcp_wait_for_log regex 'Cancelling in-flight tools/call 601' 1
     assert_success
     kill -KILL -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
 
     # The tool would outlive that window on its own terms — it ignores TERM and
     # sleeps in one-second steps for twelve seconds — so the group is gone
     # within three only because the sentinel fired.
-    run _mcp_wait_for_proc_count 0 3
+    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 0 3
     assert_success
 }
 
@@ -503,9 +336,9 @@ BODY
     mcp_start_server_isolated "${CANCELLATION_SERVER}"
     mcp_send '{"jsonrpc":"2.0","id":701,"method":"tools/call","params":{"name":"hooked_stubborn","arguments":{}}}'
 
-    run _mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" 5
     assert_success
-    run _mcp_wait_for_tool_output_count 1 5
+    run mcp_wait_for_call_roots "${TMPDIR}" 1 5
     assert_success
 
     kill -TERM -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
@@ -513,17 +346,17 @@ BODY
     # The hook is the first thing a teardown does, so its file appearing is the
     # evidence that the teardown is running: the second signal below lands
     # inside the pass rather than before it starts.
-    run _mcp_wait_for_file "${CANCEL_HOOK_FILE}" 5
+    run mcp_wait_for_file "${CANCEL_HOOK_FILE}" 5
     assert_success
     kill -TERM "${MCP_SERVER_PID}" 2>/dev/null || true
 
-    run _mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
     # The pass ran to its end rather than ending early: the tool group was killed
     # and the call's output file removed.
-    run _mcp_wait_for_tool_output_count 0 5
+    run mcp_wait_for_call_roots "${TMPDIR}" 0 5
     assert_success
-    run _mcp_wait_for_proc_count 0 5
+    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 0 5
     assert_success
     # Exactly one teardown ran, so the hook ran once: the first signal started
     # the pass and the second did not start another.
@@ -670,7 +503,7 @@ BODY
     assert [ -e "${keep_file}" ]
     run grep -qF "refusing to derive a call root from ${victim_dir}/output: not a call root" "${MCP_LOG_FILE}"
     assert_success
-    run _mcp_wait_for_exit "${decoy_pid}" 3
+    run mcp_wait_for_exit "${decoy_pid}" 3
     assert_success
     wait "${decoy_pid}" 2>/dev/null || true
 }

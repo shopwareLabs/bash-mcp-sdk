@@ -109,60 +109,6 @@ _call_request() {
         '{jsonrpc: "2.0", id: $id, method: "tools/call", params: {name: $n, arguments: {}}}'
 }
 
-# Print the names of the call roots the SDK left under TMPDIR, one per line.
-# Every per-call file lives in one.
-_call_files_left() {
-    local entry
-    for entry in "${TMPDIR}"/mcp-call.*; do
-        [[ -e "${entry}" ]] || continue
-        printf '%s\n' "${entry##*/}"
-    done
-}
-
-# Wait up to <secs> for <file> to hold something.
-_wait_for_file() {
-    local file="$1"
-    local limit="$2"
-    local deadline=$(( SECONDS + limit ))
-    while (( SECONDS < deadline )); do
-        if [[ -s "${file}" ]]; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
-# Wait up to <secs> for the server log to carry a line containing <text>.
-_wait_for_log() {
-    local text="$1"
-    local limit="$2"
-    local deadline=$(( SECONDS + limit ))
-    while (( SECONDS < deadline )); do
-        if [[ -f "${MCP_LOG_FILE}" ]] && grep -qF -- "${text}" "${MCP_LOG_FILE}"; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
-# Wait up to <secs> for process <pid> to be gone or a zombie.
-_wait_for_exit() {
-    local pid="$1"
-    local limit="$2"
-    local deadline=$(( SECONDS + limit ))
-    local state=""
-    while (( SECONDS < deadline )); do
-        state="$(_mcp_proc_state "${pid}")"
-        if [[ -z "${state}" || "${state}" == Z* ]]; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
 # --- the directory a tool sees ---
 
 @test "process_request: each call gets its own empty, writable, owner-only MCP_CALL_TMPDIR" {
@@ -246,8 +192,8 @@ _wait_for_exit() {
     call_dir="$(jq -r '.result.content[0].text' <<< "${output}")"
     assert_equal "${call_dir%/mcp-call.*/tmp}" "${TMPDIR}"
     assert [ ! -e "${call_dir}" ]
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 @test "process_request: a call that exits non-zero leaves its directory removed" {
@@ -267,8 +213,8 @@ _wait_for_exit() {
     call_dir="$(jq -r '.result.content[0].text | sub("^Error executing x: "; "")' <<< "${response}")"
     assert_equal "${call_dir%/mcp-call.*/tmp}" "${TMPDIR}"
     assert [ ! -e "${call_dir}" ]
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 @test "process_request: a call that leaves a read-only subdirectory with a file in it has its directory removed and is answered" {
@@ -289,8 +235,8 @@ _wait_for_exit() {
     call_dir="$(jq -r '.result.content[0].text' <<< "${response}")"
     assert_equal "${call_dir%/mcp-call.*/tmp}" "${TMPDIR}"
     assert [ ! -e "${call_dir}" ]
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
     run grep -qF "WARN" "${MCP_LOG_FILE}"
     assert_failure 1
 }
@@ -359,8 +305,8 @@ BODY
     assert_success
     run jq -e '.id == 1 and .result.isError == false and .result.content[0].text == "tool output"' <<< "${output}"
     assert_success
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
     run grep -qF "WARN" "${MCP_LOG_FILE}"
     assert_failure 1
 }
@@ -377,8 +323,8 @@ BODY
     assert_success
     run jq -e '.id == 1 and .result.isError == false and .result.content[0].text == "tool output"' <<< "${output}"
     assert_success
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
     run grep -qF "WARN" "${MCP_LOG_FILE}"
     assert_failure 1
 }
@@ -437,8 +383,8 @@ BODY
     assert_success
     run jq -e '.result.isError == false and .result.content[0].text == "absolute and present"' <<< "${output}"
     assert_success
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 @test "process_request: with a relative TMPDIR and no hook the tool runs (guard: unchanged behavior)" {
@@ -451,8 +397,8 @@ BODY
     assert_success
     run jq -e '.result.isError == false and .result.content[0].text == "tool output"' <<< "${output}"
     assert_success
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 # --- the call's files ---
@@ -470,14 +416,14 @@ BODY
     assert_success
     run jq -e '.result.isError == false and .result.content[0].text == "tool output"' <<< "${output}"
     assert_success
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 @test "a cancellation that has to SIGKILL the group removes the call's directory" {
     mcp_start_server "${SERVER}"
     mcp_send "$(_call_request stubborn_recorder 44)"
-    run _wait_for_file "${DIR_FILE}" 5
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
     local call_dir
     call_dir="$(<"${DIR_FILE}")"
@@ -486,35 +432,35 @@ BODY
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":44}}'
 
     # The second line is logged after the call's files are removed.
-    run _wait_for_log "Tool stubborn_recorder ignored SIGTERM; process group killed" 6
+    run mcp_wait_for_log fixed "Tool stubborn_recorder ignored SIGTERM; process group killed" 6
     assert_success
-    run _wait_for_log "Cancelled tools/call 44 (stubborn_recorder)" 3
+    run mcp_wait_for_log fixed "Cancelled tools/call 44 (stubborn_recorder)" 3
     assert_success
     assert [ ! -e "${call_dir}" ]
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 @test "a cancellation whose directory the teardown already removed logs no WARN about the call directory" {
     mcp_start_server "${SERVER}"
     mcp_send "$(_call_request recorder 55)"
-    run _wait_for_file "${DIR_FILE}" 5
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":55}}'
 
-    run _wait_for_log "Cancelled tools/call 55 (recorder)" 6
+    run mcp_wait_for_log fixed "Cancelled tools/call 55 (recorder)" 6
     assert_success
     # The dispatch's own removal runs after that line. A second `find` against
     # the path the teardown just removed is what logs the spurious WARN.
-    run _wait_for_log "call directory" 2
+    run mcp_wait_for_log fixed "call directory" 2
     assert_failure
 }
 
 @test "a server shutdown with a call in flight removes the call's directory" {
     mcp_start_server_isolated "${SERVER}"
     mcp_send "$(_call_request recorder 45)"
-    run _wait_for_file "${DIR_FILE}" 5
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
     local call_dir
     call_dir="$(<"${DIR_FILE}")"
@@ -522,11 +468,11 @@ BODY
 
     kill -TERM -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
 
-    run _wait_for_exit "${MCP_SERVER_PID}" 6
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 6
     assert_success
     assert [ ! -e "${call_dir}" ]
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 # --- the cancel hook ---
@@ -534,14 +480,14 @@ BODY
 @test "a cancellation's cancel hook reads what the call recorded in MCP_CALL_TMPDIR" {
     mcp_start_server "${SERVER}"
     mcp_send "$(_call_request recorder 46)"
-    run _wait_for_file "${DIR_FILE}" 5
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
     local call_dir
     call_dir="$(<"${DIR_FILE}")"
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":46}}'
 
-    run _wait_for_file "${CANCEL_HOOK_FILE}" 5
+    run mcp_wait_for_file "${CANCEL_HOOK_FILE}" 5
     assert_success
     assert_equal "$(<"${CANCEL_HOOK_FILE}")" "${call_dir}|recorded by the call"
 }
@@ -549,14 +495,14 @@ BODY
 @test "a shutdown's cancel hook reads what the call recorded in MCP_CALL_TMPDIR" {
     mcp_start_server_isolated "${SERVER}"
     mcp_send "$(_call_request recorder 47)"
-    run _wait_for_file "${DIR_FILE}" 5
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
     local call_dir
     call_dir="$(<"${DIR_FILE}")"
 
     kill -TERM -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
 
-    run _wait_for_exit "${MCP_SERVER_PID}" 6
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 6
     assert_success
     assert [ -e "${CANCEL_HOOK_FILE}" ]
     assert_equal "$(<"${CANCEL_HOOK_FILE}")" "${call_dir}|recorded by the call"
@@ -582,12 +528,12 @@ BODY
 @test "a tool's EXIT trap runs on the SIGTERM step of a cancellation" {
     mcp_start_server "${SERVER}"
     mcp_send "$(_call_request recorder 48)"
-    run _wait_for_file "${DIR_FILE}" 5
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":48}}'
 
-    run _wait_for_log "Cancelled tools/call 48 (recorder)" 6
+    run mcp_wait_for_log fixed "Cancelled tools/call 48 (recorder)" 6
     assert_success
     assert [ -e "${EXIT_MARKER}" ]
     # The tool died on the TERM: no SIGKILL was needed to end it.
@@ -598,12 +544,12 @@ BODY
 @test "a tool's EXIT trap runs on the SIGTERM step of a server shutdown" {
     mcp_start_server_isolated "${SERVER}"
     mcp_send "$(_call_request recorder 49)"
-    run _wait_for_file "${DIR_FILE}" 5
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
 
     kill -TERM -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
 
-    run _wait_for_exit "${MCP_SERVER_PID}" 6
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 6
     assert_success
     assert [ -e "${EXIT_MARKER}" ]
 }
@@ -611,14 +557,14 @@ BODY
 @test "a tool's EXIT trap does not run when a cancellation has to SIGKILL the group" {
     mcp_start_server "${SERVER}"
     mcp_send "$(_call_request stubborn_recorder 50)"
-    run _wait_for_file "${DIR_FILE}" 5
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":50}}'
 
-    run _wait_for_log "Tool stubborn_recorder ignored SIGTERM; process group killed" 6
+    run mcp_wait_for_log fixed "Tool stubborn_recorder ignored SIGTERM; process group killed" 6
     assert_success
-    run _wait_for_log "Cancelled tools/call 50 (stubborn_recorder)" 3
+    run mcp_wait_for_log fixed "Cancelled tools/call 50 (stubborn_recorder)" 3
     assert_success
     assert [ ! -e "${EXIT_MARKER}" ]
 }
@@ -679,8 +625,8 @@ BODY
     run jq -e '.id == 1 and .result.isError == true and .result.content[0].text == "Cannot run x: its call directory could not be created."' <<< "${output}"
     assert_success
     assert [ ! -e "${tool_marker}" ]
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
     run grep -qF "mkdir: simulated failure" "${MCP_LOG_FILE}"
     assert_success
 }
