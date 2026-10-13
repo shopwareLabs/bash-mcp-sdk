@@ -19,9 +19,18 @@
 #     the call the same way, whatever status it exits with: the tool does not
 #     run, and the isError result carries the hook's captured output when it
 #     printed any;
-#   - a hook killed by a signal stops the call with an isError result naming
-#     the signal, and a wrapper killed while no hook is defined is answered as
-#     the tool's failure, never as the hook's;
+#   - a hook stopped by the nounset it turned on ends the call the same way,
+#     and so does one stopped by the errexit it turned on, also with errtrace
+#     on in the server script, while one that returns non-zero with errexit
+#     on and no ERR trap of its own is answered as a refusal;
+#   - the server's errtrace and ERR trap apply in the tool as without a hook,
+#     and with errtrace on an ERR trap the hook installs reaches the tool;
+#   - a hook that ends with a status above 128 — killed by a signal, or
+#     stopped by errexit at a command that failed with such a status, where
+#     bash 4.1 to 4.3 end the hook with status 1 instead — stops the call
+#     with an isError result naming the status and the signal it may stand
+#     for, followed by the hook's output, and a wrapper killed while no hook
+#     is defined is answered as the tool's failure, never as the hook's;
 #   - a call that is not dispatched — an undeclared tool, arguments that fail
 #     validation — does not run the hook, and neither does an executable on
 #     PATH of that name when no function is defined;
@@ -31,7 +40,8 @@
 #     process group and is killed when the call ends.
 # Each "did not run" claim is proved by the marker file the hook or the tool
 # would have written. Requests are driven through process_request; the
-# cancellation case drives a throwaway server over the FIFO client harness.
+# errexit and cancellation cases drive a throwaway server over the FIFO client
+# harness.
 # process_request runs under `run --separate-stderr`: bash can report a failed
 # job-control setpgid for the wrapper on stderr, and that line is not part of
 # the response the assertions parse.
@@ -366,6 +376,237 @@ BODY
     _assert_result_text "${output}" false "done"
 }
 
+@test "a hook stopped by the errexit it turned on ends the call, and the tool does not run" {
+    # Driven over the server loop for the reason the test above gives: a direct
+    # process_request under `run` ignores the hook's errexit too.
+    export TOOL_MARKER="${BATS_TEST_TMPDIR}/tool.ran"
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+mcp_before_tool_call() {
+    set -e
+    false
+    printf 'continued\n'
+    return 0
+}
+tool_x() {
+    : > "${TOOL_MARKER}"
+    printf 'tool ran\n'
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    # The exact text proves the hook stopped at `false`: had it gone on, its
+    # `continued` line would follow the message.
+    _assert_result_text "${output}" true \
+        "mcp_before_tool_call ended the call instead of returning; tool x did not run."
+    assert [ ! -e "${TOOL_MARKER}" ]
+}
+
+@test "a hook with errexit on that returns non-zero is answered as a refusal" {
+    export TOOL_MARKER="${BATS_TEST_TMPDIR}/tool.ran"
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+mcp_before_tool_call() {
+    set -euo pipefail
+    printf 'denied\n'
+    return 1
+}
+tool_x() {
+    : > "${TOOL_MARKER}"
+    printf 'tool ran\n'
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    _assert_result_text "${output}" true "Error executing x: denied"
+    assert [ ! -e "${TOOL_MARKER}" ]
+}
+
+@test "with errtrace on in the server script, a hook stopped by its errexit still ends the call" {
+    # errtrace makes an ERR trap set in the dispatch reach the hook's body.
+    export TOOL_MARKER="${BATS_TEST_TMPDIR}/tool.ran"
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+set -E
+mcp_before_tool_call() {
+    set -e
+    false
+    printf 'continued\n'
+    return 0
+}
+tool_x() {
+    : > "${TOOL_MARKER}"
+    printf 'tool ran\n'
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    _assert_result_text "${output}" true \
+        "mcp_before_tool_call ended the call instead of returning; tool x did not run."
+    assert [ ! -e "${TOOL_MARKER}" ]
+}
+
+@test "a hook stopped by its errexit answers with what it printed before the failing command" {
+    export TOOL_MARKER="${BATS_TEST_TMPDIR}/tool.ran"
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+mcp_before_tool_call() {
+    set -e
+    printf 'before\n'
+    false
+    printf 'after\n'
+    return 0
+}
+tool_x() {
+    : > "${TOOL_MARKER}"
+    printf 'tool ran\n'
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    _assert_result_text "${output}" true \
+        "$(printf 'mcp_before_tool_call ended the call instead of returning; tool x did not run.\nbefore')"
+    assert [ ! -e "${TOOL_MARKER}" ]
+}
+
+@test "a hook stopped by its nounset ends the call, and the tool does not run" {
+    export TOOL_MARKER="${BATS_TEST_TMPDIR}/tool.ran"
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+mcp_before_tool_call() {
+    set -u
+    printf '%s\n' "$undefined_variable"
+    return 0
+}
+tool_x() {
+    : > "${TOOL_MARKER}"
+    printf 'tool ran\n'
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    run jq -e '.id == 1 and .result.isError == true and (.result.content[0].text | startswith("mcp_before_tool_call ended the call instead of returning; tool x did not run."))' <<< "${output}"
+    assert_success
+    assert [ ! -e "${TOOL_MARKER}" ]
+}
+
+@test "a hook whose errexit stops it with a status above 128 is not reported as killed by a signal alone" {
+    if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+        skip "bash ${BASH_VERSION} ends a shell errexit stops with status 1, not the failed command's status"
+    fi
+    # The hook ends with the status a SIGPIPE death would give.
+    export TOOL_MARKER="${BATS_TEST_TMPDIR}/tool.ran"
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+mcp_before_tool_call() {
+    set -e
+    (exit 141)
+    return 0
+}
+tool_x() {
+    : > "${TOOL_MARKER}"
+    printf 'tool ran\n'
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    _assert_result_text "${output}" true \
+        "mcp_before_tool_call ended with status 141 before returning (signal 13, or a command that failed with that status); tool x did not run."
+    assert [ ! -e "${TOOL_MARKER}" ]
+}
+
+@test "with a hook defined, the server's errtrace and ERR trap still apply in the tool" {
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+set -E
+trap 'printf "server-err\n"' ERR
+mcp_before_tool_call() {
+    return 0
+}
+tool_x() {
+    false
+    printf 'done\n'
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    _assert_result_text "${output}" false "$(printf 'server-err\ndone')"
+}
+
+@test "with a hook defined, the tool runs with the errtrace the server script turned on" {
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+set -E
+mcp_before_tool_call() {
+    return 0
+}
+tool_x() {
+    if [[ $- == *E* ]]; then
+        printf 'errtrace on\n'
+    else
+        printf 'errtrace off\n'
+    fi
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    _assert_result_text "${output}" false "errtrace on"
+}
+
+@test "an ERR trap the hook installs reaches the tool" {
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+set -E
+mcp_before_tool_call() {
+    trap 'printf "hook-err\n"' ERR
+    return 0
+}
+tool_x() {
+    false
+    printf 'done\n'
+}
+BODY
+    mcp_start_server "${server}"
+
+    mcp_send "$(_call_request x '{}' 1)"
+    run mcp_wait_for_response 1 5
+
+    assert_success
+    _assert_result_text "${output}" false "$(printf 'hook-err\ndone')"
+}
+
 @test "process_request: a shopt option the hook sets does not reach the tool" {
     local missing_dir="${BATS_TEST_TMPDIR}/no-such-dir"
     mcp_before_tool_call() { shopt -s nullglob; }
@@ -561,7 +802,7 @@ BODY
     assert_equal "${text}" "long=${long_pid}"
 }
 
-@test "process_request: a hook killed by a signal answers isError naming the signal and the tool does not run" {
+@test "process_request: a hook killed by a signal answers isError naming its status, the signal and its output, and the tool does not run" {
     local tool_marker="${BATS_TEST_TMPDIR}/tool.ran"
     mcp_before_tool_call() {
         printf 'about to be killed\n'
@@ -573,9 +814,9 @@ BODY
 
     assert_success
     _assert_result_text "${output}" true \
-        "mcp_before_tool_call was killed by signal 9; tool x did not run."
+        "$(printf '%s\n%s' "mcp_before_tool_call ended with status 137 before returning (signal 9, or a command that failed with that status); tool x did not run." "about to be killed")"
     assert [ ! -e "${tool_marker}" ]
-    run grep -qF "Before-tool hook mcp_before_tool_call for tool x was killed (status 137)" "${MCP_LOG_FILE}"
+    run grep -qF "Before-tool hook mcp_before_tool_call for tool x ended with status 137 (signal 9, or a command that failed with that status)" "${MCP_LOG_FILE}"
     assert_success
 }
 

@@ -59,14 +59,18 @@ Before the spawn, `handle_tools_call` creates the call root with `mktemp -d` und
 | `output` | The wrapper's stdout and stderr | The wrapper's redirection |
 | `sentinel` | The lifeline sentinel's pid, on the server loop only | The wrapper |
 | `tmp` | `MCP_CALL_TMPDIR`, created with `mkdir -m 700` | `handle_tools_call` |
-| `hook-output` | `mcp_before_tool_call`'s stdout and stderr; left in the root, which the answer for a hook that called `exit` reads it out of, and removed with the root | `_mcp_run_tool` |
+| `hook-output` | `mcp_before_tool_call`'s stdout and stderr; left in the root, which the answer for a hook that ended the call without returning reads it out of, and removed with the root | `_mcp_run_tool` |
 | `hook-running` | Nothing; present from before the hook runs until the root is removed | `_mcp_run_tool` |
 | `hook-returned` | Nothing; present once the hook has returned, whatever its status | `_mcp_run_tool` |
 | `hook-refused` | Nothing; present once the hook has returned non-zero | `_mcp_run_tool` |
 
 A root that cannot be created, or a `tmp` that cannot, fails the call: the error is logged, whatever was created is removed, an `isError` result answers, and nothing is spawned. Each status is checked, so a failed `mktemp -d` never leaves a path relative to the working directory.
 
-Inside the wrapper, `_reset_tool_dispatch_state` runs first. The wrapper then exports `MCP_CALL_TMPDIR` and calls `_mcp_run_tool`. When `declare -F` finds `mcp_before_tool_call`, that function saves the shell options from `set +o` and `shopt -p`, with `monitor` recorded as off by `set +o`, creates `hook-running`, and runs the hook in a brace group redirected to `hook-output`. A brace group does not fork, so the hook's assignments, functions, working directory and `EXIT` trap stay in the wrapper's shell for the tool. Once the hook returns, the saved options are restored and `hook-returned` is written, whatever the status. None of the steps that follow the hook reaches for an external command — the restore runs `builtin set` and `builtin shopt`, and every marker is a bare redirection — so a hook that rewrites `PATH` cannot strand a marker. The tool therefore runs with errexit off even after a hook that turned it on.
+Inside the wrapper, `_reset_tool_dispatch_state` runs first. The wrapper then exports `MCP_CALL_TMPDIR` and calls `_mcp_run_tool`. When `declare -F` finds `mcp_before_tool_call`, that function saves the shell options from `set +o` and `shopt -p`, with `monitor` recorded as off by `set +o`, and the `ERR` trap then in force. It creates `hook-running` and installs its own `ERR` trap, which turns errexit off when it fires in the `_mcp_run_tool` frame. It then runs the hook in a brace group redirected to `hook-output`. A brace group does not fork, so the hook's assignments, functions, working directory and `EXIT` trap stay in the wrapper's shell for the tool.
+
+The hook is called as a plain statement, not as an `if` condition, because Bash ignores errexit in every function called from a condition. An errexit the hook turns on therefore stops it, and the wrapper ends before `hook-returned` is written. A hook that returns non-zero with errexit on would end the wrapper the same way at the call site; the SDK's `ERR` trap fires there first and turns errexit off, so the status reaches the refusal branch, unless the hook replaced that trap with an `ERR` trap of its own (`docs/server-contract.md` §Running a step before every tool). The `FUNCNAME` check confines that to the call site: with errtrace on in the server script, the trap is inherited by the hook, and turning errexit off there would undo the hook's own errexit.
+
+Once the hook returns, the saved options are restored, the `shopt` snapshot first because its `shopt -u extdebug` turns errtrace off and the `set` snapshot turns it back on. If the `ERR` trap is still the SDK's, the trap saved before the hook is put back, or the trap is cleared when there was none. An `ERR` trap the hook installed stays in the wrapper's shell, and with errtrace on the tool inherits it. With errtrace off, Bash 4.1 to 4.3 put back the trap in force at the hook's entry when the hook returns, which is the SDK's, so the saved trap is put back; Bash 4.4 and 5.3 keep the hook's trap. `hook-returned` is then written, whatever the status. None of the steps that follow the hook reaches for an external command — the restore runs `builtin set`, `builtin shopt` and `builtin trap`, and every marker is a bare redirection — so a hook that rewrites `PATH` cannot strand a marker. The tool therefore runs with errexit off even after a hook that turned it on.
 
 A non-zero hook status creates `hook-refused`, prints the capture to stdout, which is the call's output file, and becomes the wrapper's exit status. A zero status leaves the capture unread and runs the tool; the capture file stays in the root either way, and goes when the root does. No hook means no marker at all.
 
@@ -75,19 +79,19 @@ A non-zero hook status creates `hook-refused`, prints the capture to stdout, whi
 | Root holds | Wrapper status | Answer | Log |
 |---|---|---|---|
 | `hook-running` without `hook-returned` | 128 or below | `isError` naming the hook as having ended the call, followed by the captured output when there is any | `ERROR` naming the hook and the status |
-| `hook-running` without `hook-returned` | above 128 | `isError` naming the signal that killed the hook | `ERROR` naming the hook and the status |
+| `hook-running` without `hook-returned` | above 128 | `isError` naming the status and the signal it may stand for, since a signal death and an exit with status 128+N look the same, followed by the captured output when there is any | `ERROR` naming the hook, the status and the signal |
 | `hook-refused` | non-zero | `isError` with the hook's output, as for a failing tool | `before-tool hook refused tool <name> (status N)` |
 | otherwise | non-zero | `isError` with the tool's output | `Tool <name> failed with exit code N` |
 | otherwise | 0 | the tool's output | none |
 
-A `hook-running` with no `hook-returned` means the hook never returned: it called `exit`, or a signal killed the wrapper. Whatever status the hook exited with is discarded.
+A `hook-running` with no `hook-returned` means the hook never returned: it called `exit`, its own errexit or nounset stopped it, or a signal killed the wrapper. Whatever status the hook exited with is discarded.
 
 The process group is the containment boundary.
 
 | Member | Enters the group | Leaves it |
 |---|---|---|
-| The wrapper subshell | `set -m` makes it the leader, and its pid is the group id | Exits when the tool function returns, or when the hook returns non-zero or calls `exit` |
-| The before-tool hook | Runs inside the wrapper, before the tool | Returns before the tool runs; a non-zero return or an `exit` ends the wrapper |
+| The wrapper subshell | `set -m` makes it the leader, and its pid is the group id | Exits when the tool function returns, or when the hook returns non-zero, calls `exit`, or is stopped by its own errexit or nounset |
+| The before-tool hook | Runs inside the wrapper, before the tool | Returns before the tool runs; a non-zero return, an `exit`, or a stop by its own errexit or nounset ends the wrapper |
 | The tool function | Runs inside the wrapper | Exits with the wrapper |
 | The lifeline sentinel | The wrapper starts it before the tool | Waits on the lifeline, so it outlives the tool; the group SIGKILL reaps it |
 | Anything the tool started and did not wait for | Inherits the group | The group SIGKILL reaps it |
