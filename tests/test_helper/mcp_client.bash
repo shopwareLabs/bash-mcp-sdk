@@ -11,6 +11,12 @@
 # Exports set by mcp_start_server:
 #   MCP_SERVER_PID      pid of the server process
 #   MCP_SERVER_OUT      file capturing the server's stdout (the JSON-RPC stream)
+#                       from the first response after startup on:
+#                       mcp_start_server sends one ping of its own (id
+#                       "mcp-harness-ready"), checks that its response is the
+#                       only thing on the stream, then empties the file. The
+#                       ping still appears in the server's log and, with
+#                       MCP_LOG_STDERR, in MCP_SERVER_ERR.
 #   MCP_SERVER_ERR      file capturing the server's stderr
 #   MCP_CLIENT_TMPDIR   directory holding the FIFO and both capture files
 #   MCP_SERVER_INSTANCE marker unique to this start, carried in the server's
@@ -50,11 +56,63 @@ _mcp_proc_state() {
     return 0
 }
 
+# Wait until the server just started answers a ping, so its startup (temp files,
+# trap installation) is complete before a test signals it or counts its
+# processes. Fails loudly on a ping that cannot be written, a server that is
+# gone, no answer in 10s, or anything on the protocol stream besides the ping's
+# own response: a server that died at startup has not started, and driving its
+# pipe would raise the failure somewhere else entirely. On success the capture
+# file is emptied, so MCP_SERVER_OUT holds only what a test provokes itself.
+_mcp_await_ready() {
+    local ready_id="mcp-harness-ready"
+    local expected='{"jsonrpc":"2.0","id":"mcp-harness-ready","result":{}}'
+    local timeout=10
+    local reason=""
+
+    if ! mcp_send "{\"jsonrpc\":\"2.0\",\"id\":\"${ready_id}\",\"method\":\"ping\"}" 2>/dev/null; then
+        reason="exited during startup (the ping could not be written)"
+    else
+        local deadline=$(( SECONDS + timeout ))
+        local state
+        reason="gave no ping answer within ${timeout}s"
+        while (( SECONDS < deadline )); do
+            # The id is on the stream and the last byte is a newline, so the
+            # response is whole: the comparison never sees a half-written line.
+            if grep -qF "\"id\":\"${ready_id}\"" "${MCP_SERVER_OUT}" \
+                && [[ -z "$(tail -c 1 "${MCP_SERVER_OUT}")" ]]; then
+                if cmp -s - "${MCP_SERVER_OUT}" <<< "${expected}"; then
+                    : > "${MCP_SERVER_OUT}"
+                    return 0
+                fi
+                reason="wrote to the protocol stream during startup"
+                break
+            fi
+            # An empty state means the shell already reaped the child, and a
+            # leading "Z" means it exited and is waiting to be reaped. `kill -0`
+            # cannot stand in for this: it succeeds for a zombie.
+            state="$(_mcp_proc_state "${MCP_SERVER_PID}")"
+            if [[ -z "${state}" || "${state}" == Z* ]]; then
+                reason="exited during startup"
+                break
+            fi
+            sleep 0.1
+        done
+    fi
+
+    printf 'mcp_start_server: server %s %s\n' "${MCP_SERVER_PID}" "${reason}" >&2
+    if [[ -s "${MCP_SERVER_OUT}" ]]; then
+        printf 'mcp_start_server: server stdout:\n%s\n' "$(< "${MCP_SERVER_OUT}")" >&2
+    fi
+    if [[ -s "${MCP_SERVER_ERR}" ]]; then
+        printf 'mcp_start_server: server stderr:\n%s\n' "$(< "${MCP_SERVER_ERR}")" >&2
+    fi
+    mcp_stop_server
+    return 1
+}
+
 # Start <server-script-path> with a FIFO as its stdin and its stdout and stderr
-# captured to files under a fresh temp dir. Blocks only as long as the FIFO
-# rendezvous takes, then fails loudly if the server is gone 0.2s in — a server
-# that died at startup has not started, and driving its pipe would raise the
-# failure somewhere else entirely.
+# captured to files under a fresh temp dir. Returns once the server has answered
+# a ping, so it is past startup; fails loudly if it never does.
 mcp_start_server() {
     local server_script="${1:-}"
     if [[ -z "${server_script}" || ! -x "${server_script}" ]]; then
@@ -82,33 +140,19 @@ mcp_start_server() {
     MCP_SERVER_INSTANCE="mcp-test-$$-${RANDOM}${RANDOM}"
     export MCP_SERVER_INSTANCE
 
+    # Opened for append: the harness empties this file while the server holds it,
+    # and a plain write offset would leave NUL bytes before the next response.
     # The child blocks opening the FIFO for reading until the parent opens the
     # write end below; the two opens complete together.
     "${server_script}" "--mcp-test-instance=${MCP_SERVER_INSTANCE}" \
-        < "${MCP_SERVER_IN}" > "${MCP_SERVER_OUT}" 2> "${MCP_SERVER_ERR}" &
+        < "${MCP_SERVER_IN}" >> "${MCP_SERVER_OUT}" 2> "${MCP_SERVER_ERR}" &
     MCP_SERVER_PID=$!
     export MCP_SERVER_PID
 
     exec {MCP_CLIENT_FD}> "${MCP_SERVER_IN}"
     MCP_CLIENT_FD_OPEN=1
 
-    sleep 0.2
-    # The pid's state is what tells a live server from a dead one: an empty
-    # state means the shell already reaped the child, and a leading "Z" means it
-    # exited and is waiting to be reaped. `kill -0` cannot stand in for this —
-    # it succeeds for a zombie, so a server that died within the 0.2s would
-    # count as started and the failure would surface on the first write instead.
-    local state
-    state="$(_mcp_proc_state "${MCP_SERVER_PID}")"
-    if [[ -z "${state}" || "${state}" == Z* ]]; then
-        printf 'mcp_start_server: server %s exited within 0.2s\n' "${MCP_SERVER_PID}" >&2
-        if [[ -s "${MCP_SERVER_ERR}" ]]; then
-            printf 'mcp_start_server: server stderr:\n%s\n' "$(< "${MCP_SERVER_ERR}")" >&2
-        fi
-        mcp_stop_server
-        return 1
-    fi
-    return 0
+    _mcp_await_ready
 }
 
 # Write one JSON-RPC line to the server's stdin. Fails rather than sending a
@@ -123,7 +167,13 @@ mcp_send() {
         printf 'mcp_send: refusing to send an empty line\n' >&2
         return 1
     fi
-    printf '%s\n' "${line}" >&"${MCP_CLIENT_FD}"
+    # In a subshell: to a dead reader the write raises SIGPIPE, which ends the
+    # subshell instead of the test process.
+    if ! ( printf '%s\n' "${line}" >&"${MCP_CLIENT_FD}" ) 2>/dev/null; then
+        printf 'mcp_send: write failed; the server is not reading its stdin (pid %s)\n' \
+            "${MCP_SERVER_PID}" >&2
+        return 1
+    fi
 }
 
 # Close the held write end, so the server reads EOF. Safe on an already-closed

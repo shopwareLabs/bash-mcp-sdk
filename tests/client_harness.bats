@@ -9,6 +9,7 @@ bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
 load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
+load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 CANCELLATION_SERVER="${REPO_ROOT}/tests/fixtures/cancellation_server.sh"
 
@@ -81,4 +82,81 @@ teardown() {
     run jq -r '.error.message' <<< "${response}"
     assert_success
     assert_output "Invalid tool name: O'Brien ✓ ünïcödé"
+}
+
+# Except where a test uses the fixture server from setup, the tests below stop
+# it and start their own.
+
+@test "mcp_start_server: returns only after the server has finished its startup" {
+    # The body is the server's startup work: a delay between sourcing the core
+    # and run_mcp_server, then a marker. A start that returned after a fixed
+    # short wait would return before the marker exists.
+    mcp_stop_server
+    printf '{}' > "${BATS_TEST_TMPDIR}/config.json"
+    printf '[]' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_server "${BATS_TEST_TMPDIR}/slow_start.sh" <<BODY
+sleep 1
+touch "${BATS_TEST_TMPDIR}/startup.done"
+BODY
+
+    mcp_start_server "${BATS_TEST_TMPDIR}/slow_start.sh"
+
+    [[ -f "${BATS_TEST_TMPDIR}/startup.done" ]]
+}
+
+@test "mcp_start_server: fails when the server writes to the protocol stream during startup" {
+    mcp_stop_server
+    printf '{}' > "${BATS_TEST_TMPDIR}/config.json"
+    printf '[]' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_server "${BATS_TEST_TMPDIR}/noisy.sh" <<'BODY'
+printf 'startup noise\n' >&"${_MCP_PROTOCOL_FD}"
+BODY
+
+    run mcp_start_server "${BATS_TEST_TMPDIR}/noisy.sh"
+
+    assert_equal "${status}" 1
+    assert_output --regexp 'server [0-9]+ wrote to the protocol stream during startup'
+    assert_output --partial 'startup noise'
+}
+
+@test "mcp_start_server: leaves the capture file empty after a clean start" {
+    run wc -c < "${MCP_SERVER_OUT}"
+    assert_success
+    assert_output --regexp '^[[:space:]]*0$'
+}
+
+@test "mcp_start_server: a response written after the start is the first line in the output" {
+    # The harness empties the capture file after the readiness ping while the
+    # server still holds it; a server writing at its old offset would leave NUL
+    # bytes ahead of this line.
+    mcp_send '{"jsonrpc":"2.0","id":7,"method":"ping"}'
+
+    run mcp_wait_for_response 7
+    assert_success
+    # Compared byte for byte: command substitution would drop the NUL bytes.
+    run cmp - "${MCP_SERVER_OUT}" <<< '{"jsonrpc":"2.0","id":7,"result":{}}'
+    assert_success
+}
+
+@test "mcp_start_server: fails with the server's stderr when the server exits before serving" {
+    mcp_stop_server
+    printf '{}' > "${BATS_TEST_TMPDIR}/config.json"
+    printf '[]' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_server "${BATS_TEST_TMPDIR}/dies.sh" <<< 'echo "startup refused" >&2; exit 1'
+
+    run mcp_start_server "${BATS_TEST_TMPDIR}/dies.sh"
+
+    assert_equal "${status}" 1
+    assert_output --regexp 'server [0-9]+ exited during startup'
+    assert_output --partial 'startup refused'
+}
+
+@test "mcp_send: fails with the server's pid when the server is gone" {
+    kill -KILL "${MCP_SERVER_PID}"
+    wait "${MCP_SERVER_PID}" || true
+
+    run mcp_send '{"jsonrpc":"2.0","id":8,"method":"ping"}'
+
+    assert_equal "${status}" 1
+    assert_output "mcp_send: write failed; the server is not reading its stdin (pid ${MCP_SERVER_PID})"
 }

@@ -33,10 +33,10 @@ Source of truth for one file, `lib/mcpserver_core.sh`, the Bash MCP server frame
 | `tests/extra_log_file.bats` | Pins the logging surface (`log`, `_configure_extra_log_file`), including that a failed log-file write leaves the server answering with a stderr note, and that newlines and carriage returns in a logged message are escaped |
 | `tests/cancellation.bats` | Pins cancellation: the in-flight kill, the absent response, ignored cancellations, the cancel hook, tool stdin, and the EOF drain |
 | `tests/lifecycle.bats` | Pins server teardown: group and pid signals, the SIGKILL sentinel, and that no tool process outlives the server |
-| `tests/client_harness.bats` | Pins the FIFO client harness: start a server, send one line, wait for a response, assert silence, tear down |
+| `tests/client_harness.bats` | Pins the FIFO client harness: start a server, send one line, wait for a response, assert silence, tear down; that a start fails when the server writes to the protocol stream before the readiness ping's answer, leaves the capture file empty otherwise, and that `mcp_send` to a dead server fails with status 1 and its pid |
 | `tests/fixtures/` | The fixture server (`cancellation_server.sh`) and tools list the cancellation and lifecycle suites drive over the real protocol |
 | `tests/test_helper/common_setup.bash` | `REPO_ROOT` resolution; loads bats-support and bats-assert |
-| `tests/test_helper/mcp_client.bash` | The client harness: the server's FIFO stdin, its capture files, and the per-start instance marker a suite scopes a process count with |
+| `tests/test_helper/mcp_client.bash` | The client harness: the server's FIFO stdin, its capture files (the stdout file emptied after the start's own readiness `ping`, whose response must be the only startup output), and the per-start instance marker a suite scopes a process count with; `mcp_send` fails when the server no longer reads its stdin |
 | `tests/test_helper/write_server.bash` | The server-script writer suites build throwaway servers with: preamble, `MCP_*` exports, the `source` line and `run_mcp_server`, body from stdin; `tests/fixtures/cancellation_server.sh` stays a static fixture |
 | `.github/scripts/setup-bats.sh` | Installs BATS into `.bats/` for local runs and every CI test job |
 | `.github/workflows/ci.yml` | CI: a runner-native ShellCheck job over `lib`, `tests`, `scripts`, `.github/scripts`, and a Debian/Alpine container matrix running BATS through the script, images built with a GHCR cache |
