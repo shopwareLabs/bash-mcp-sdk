@@ -1443,7 +1443,11 @@ _mcp_remove_call_root() {
 # a directory it changes to, and an EXIT trap it installs reach the tool. The
 # shell options are the exception: those the hook sets are put back before the
 # tool runs, and so are functions: what the hook defines reaches the tool but
-# not the steps this function runs once the hook has returned.
+# not the steps this function runs once the hook has returned. Bash scopes
+# variables dynamically, so a hook assignment to a name it does not declare
+# `local` writes to the nearest local of that name, in this function or a
+# caller: every value read after the hook is therefore a positional parameter,
+# which the hook cannot reach, or is assigned after the hook returns.
 # docs/server-contract.md §Running a step before every tool.
 # Args: $1 = tool function name, $2 = tool name, $3 = the call's arguments JSON,
 #       $4 = the call root, which holds the hook's capture file and markers
@@ -1451,29 +1455,30 @@ _mcp_remove_call_root() {
 #          pointed at the call's output file; otherwise the tool's own output.
 # Returns: the hook's status when it is non-zero, else the tool's status
 _mcp_run_tool() {
-    local func_name="$1"
-    local tool_name="$2"
-    local arguments="$3"
-    local call_root="$4"
-
     # `declare -F` matches a shell function only, as for the tool itself: an
     # executable or alias named mcp_before_tool_call never runs as the hook.
     if declare -F mcp_before_tool_call >/dev/null; then
-        local hook_status=0
-        local saved_set saved_shopt
-        saved_set=$(set +o)
-        saved_shopt=$(shopt -p)
+        local hook_status
+        # $5 and $6 hold the shell option snapshots the restore below
+        # re-executes. They are positional so the hook cannot overwrite them.
+        set -- "$@" "$(set +o)" "$(shopt -p)"
         # The marker outlives the wrapper only when the hook never returned —
         # it called `exit` or a signal killed the wrapper — which is what
         # handle_tools_call answers for once the wrapper is reaped. A bare
         # redirection, so no command name the hook could shadow — `:` included —
         # is reached and no PATH lookup happens.
         # shellcheck disable=SC2188 # a commandless redirection is the point: any command name here is one the hook may have shadowed or taken off PATH.
-        >"$call_root/hook-running"
+        >"$4/hook-running"
         # A brace group, not a subshell: its redirection applies without a fork,
         # so what the hook sets survives into the tool call below. The capture
-        # keeps a successful hook's output out of the tool result.
-        { mcp_before_tool_call "$tool_name" "$arguments"; } >"$call_root/hook-output" 2>&1 || hook_status=$?
+        # keeps a successful hook's output out of the tool result. hook_status
+        # is assigned on both branches, so a value the hook stored in it is
+        # overwritten.
+        if { mcp_before_tool_call "$2" "$3"; } >"$4/hook-output" 2>&1; then
+            hook_status=0
+        else
+            hook_status=$?
+        fi
         # Every step below runs after the hook returned, so each one bypasses
         # what the hook may have changed: a function it defined named `set`,
         # `shopt` or `printf` must not take over the SDK's own steps, and a PATH
@@ -1486,26 +1491,26 @@ _mcp_run_tool() {
         # resolve to the hook's functions. The tool call at the end is
         # deliberately not bypassed: a function the hook defines reaches the
         # tool. docs/server-contract.md §Running a step before every tool.
-        # Restored before anything else runs, so an errexit or nounset the hook
-        # turned on governs neither the steps below nor the tool.
-        builtin eval "builtin ${saved_set//$'\n'/$'\n'builtin }"
-        builtin eval "builtin ${saved_shopt//$'\n'/$'\n'builtin }"
+        # Restored before any step below runs, so an errexit or nounset the hook
+        # turned on governs neither those steps nor the tool.
+        builtin eval "builtin ${5//$'\n'/$'\n'builtin }"
+        builtin eval "builtin ${6//$'\n'/$'\n'builtin }"
         # Written whatever the hook's status, and before the refusal branch: this
         # plus `hook-running` is what tells handle_tools_call the hook returned
         # rather than died. It is left in place with `hook-output`; the whole
         # root goes when the call does.
         # shellcheck disable=SC2188 # a commandless redirection is the point: any command name here is one the hook may have shadowed or taken off PATH.
-        >"$call_root/hook-returned"
+        >"$4/hook-returned"
         if [[ $hook_status -ne 0 ]]; then
             # Tells handle_tools_call that the non-zero status is the hook's
             # refusal, not the tool's failure.
             # shellcheck disable=SC2188 # a commandless redirection is the point: any command name here is one the hook may have shadowed or taken off PATH.
-            >"$call_root/hook-refused"
-            builtin printf '%s' "$(<"$call_root/hook-output")"
+            >"$4/hook-refused"
+            builtin printf '%s' "$(<"$4/hook-output")"
             builtin return "$hook_status"
         fi
     fi
-    "$func_name" "$arguments"
+    "$1" "$3"
 }
 
 # The pid recorded in a call's sentinel file. Empty when no record was written —

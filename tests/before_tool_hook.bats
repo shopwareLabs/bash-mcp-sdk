@@ -7,6 +7,8 @@
 #   - a hook that returns 0 has its output discarded, and what it sets — a
 #     variable, the working directory, an EXIT trap — reaches the tool, while
 #     a shell option it sets does not;
+#   - a variable the hook assigns does not change which tool function runs,
+#     the arguments it receives, or how the call is reported;
 #   - a function the hook defines reaches the tool, but not the SDK's own steps
 #     after the hook returns, and neither does a PATH the hook rewrites: those
 #     steps reach no external command;
@@ -377,6 +379,43 @@ BODY
     assert_success
     # Without nullglob an unmatched glob stays one literal word.
     _assert_result_text "${output}" false "1"
+}
+
+@test "process_request: variables the hook assigns do not change which tool runs, its arguments, or how the call is reported" {
+    local inner_marker="${BATS_TEST_TMPDIR}/inner.ran"
+    # Each assignment is non-local, so it lands in whatever variable of that
+    # name the hook's callers hold. Every value would change the outcome if
+    # the SDK read it after the hook: another declared tool, other arguments,
+    # a call root that does not exist, a refusal status, and option snapshots
+    # that print a marker when they are re-executed.
+    mcp_before_tool_call() {
+        func_name=tool_inner
+        arguments='{"n":99}'
+        call_root=/nonexistent
+        hook_status=1
+        saved_set='printf INJECTED-SET'
+        saved_shopt='printf INJECTED-SHOPT'
+        set -f
+        return 0
+    }
+    tool_inner() { : > "${inner_marker}"; printf 'inner ran\n'; }
+    tool_x() {
+        local noglob=off
+        if [[ $- == *f* ]]; then
+            noglob=on
+        fi
+        printf '%s noglob=%s\n' "$1" "${noglob}"
+    }
+
+    run --separate-stderr process_request "$(_call_request x '{"n": 7}')"
+
+    assert_success
+    # The exact text proves the requested tool ran with the validated
+    # arguments, that no snapshot string was executed, and that the call was
+    # not answered as a refusal or as a hook that ended it; noglob=off proves
+    # the restore ran from the SDK's own snapshot.
+    _assert_result_text "${output}" false '{"n":7} noglob=off'
+    assert [ ! -e "${inner_marker}" ]
 }
 
 # --- a hook that rewrites PATH ---
