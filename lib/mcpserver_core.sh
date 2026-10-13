@@ -1447,7 +1447,8 @@ _mcp_remove_call_root() {
 # variables dynamically, so a hook assignment to a name it does not declare
 # `local` writes to the nearest local of that name, in this function or a
 # caller: every value read after the hook is therefore a positional parameter,
-# which the hook cannot reach, or is assigned after the hook returns.
+# which the hook cannot reach, or the hook's own status in `$?`, which is
+# recorded as one at once.
 # docs/server-contract.md §Running a step before every tool.
 # Args: $1 = tool function name, $2 = tool name, $3 = the call's arguments JSON,
 #       $4 = the call root, which holds the hook's capture file and markers
@@ -1458,10 +1459,10 @@ _mcp_run_tool() {
     # `declare -F` matches a shell function only, as for the tool itself: an
     # executable or alias named mcp_before_tool_call never runs as the hook.
     if declare -F mcp_before_tool_call >/dev/null; then
-        local hook_status
         # $5 and $6 hold the shell option snapshots the restore below
-        # re-executes. They are positional so the hook cannot overwrite them.
-        set -- "$@" "$(set +o)" "$(shopt -p)"
+        # re-executes, and $7 the hook's status. They are positional so the
+        # hook cannot overwrite them.
+        set -- "$1" "$2" "$3" "$4" "$(set +o)" "$(shopt -p)"
         # The marker outlives the wrapper only when the hook never returned —
         # it called `exit` or a signal killed the wrapper — which is what
         # handle_tools_call answers for once the wrapper is reaped. A bare
@@ -1471,13 +1472,13 @@ _mcp_run_tool() {
         >"$4/hook-running"
         # A brace group, not a subshell: its redirection applies without a fork,
         # so what the hook sets survives into the tool call below. The capture
-        # keeps a successful hook's output out of the tool result. hook_status
-        # is assigned on both branches, so a value the hook stored in it is
-        # overwritten.
+        # keeps a successful hook's output out of the tool result. The hook's
+        # status is appended as $7 on both branches. `builtin` keeps a function
+        # the hook defined named `set` from taking over the append.
         if { mcp_before_tool_call "$2" "$3"; } >"$4/hook-output" 2>&1; then
-            hook_status=0
+            builtin set -- "$@" 0
         else
-            hook_status=$?
+            builtin set -- "$@" "$?"
         fi
         # Every step below runs after the hook returned, so each one bypasses
         # what the hook may have changed: a function it defined named `set`,
@@ -1501,13 +1502,13 @@ _mcp_run_tool() {
         # root goes when the call does.
         # shellcheck disable=SC2188 # a commandless redirection is the point: any command name here is one the hook may have shadowed or taken off PATH.
         >"$4/hook-returned"
-        if [[ $hook_status -ne 0 ]]; then
+        if [[ $7 -ne 0 ]]; then
             # Tells handle_tools_call that the non-zero status is the hook's
             # refusal, not the tool's failure.
             # shellcheck disable=SC2188 # a commandless redirection is the point: any command name here is one the hook may have shadowed or taken off PATH.
             >"$4/hook-refused"
             builtin printf '%s' "$(<"$4/hook-output")"
-            builtin return "$hook_status"
+            builtin return "$7"
         fi
     fi
     "$1" "$3"

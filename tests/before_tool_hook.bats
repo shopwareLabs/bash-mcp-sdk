@@ -392,7 +392,7 @@ BODY
         func_name=tool_inner
         arguments='{"n":99}'
         call_root=/nonexistent
-        hook_status=1
+        readonly hook_status=1
         saved_set='printf INJECTED-SET'
         saved_shopt='printf INJECTED-SHOPT'
         set -f
