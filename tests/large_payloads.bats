@@ -88,25 +88,10 @@ BODY
     mcp_start_server "${SERVER}"
 }
 
-# Assert that the response in ${output} is a result whose isError is
-# <is_error> and whose text is byte-for-byte the content of <expected-file>.
-_assert_result_text() {
-    local is_error="$1"
-    local expected_file="$2"
-    local got_file="${BATS_TEST_TMPDIR}/got.txt"
-    local response="${output}"
-
-    run jq -r '.result.isError' <<< "${response}"
-    assert_output "${is_error}"
-    printf '%s\n' "${response}" | jq -j '.result.content[0].text' > "${got_file}"
-    run cmp "${got_file}" "${expected_file}"
-    assert_equal "${status}" 0
-}
-
 # Send a ping with <id> and assert it is answered.
 _assert_ping_answered() {
     local id="$1"
-    mcp_send "{\"jsonrpc\":\"2.0\",\"id\":${id},\"method\":\"ping\"}"
+    mcp_send "$(mcp_ping_request "${id}")"
     run mcp_wait_for_response "${id}" 10
     assert_equal "${status}" 0
 }
@@ -118,10 +103,10 @@ _assert_call_text_then_ping() {
     local tool="$1"
     local is_error="$2"
     local expected_file="$3"
-    mcp_send "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":{}}}"
+    mcp_send "$(mcp_tools_call_request 1 "${tool}" '{}')"
     run mcp_wait_for_response 1 30
     assert_equal "${status}" 0
-    _assert_result_text "${is_error}" "${expected_file}"
+    mcp_assert_tool_result_file "${output}" 1 "${is_error}" "${expected_file}"
     _assert_ping_answered 2
 }
 
@@ -181,8 +166,7 @@ _source_sdk() {
     mcp_send "${request}"
     run mcp_wait_for_response 1 30
     assert_equal "${status}" 0
-    run jq -r '.result.content[0].text' <<< "${output}"
-    assert_output "recorded"
+    mcp_assert_tool_result "${output}" 1 false "recorded"
 
     jq -j '.text' "${ARGS_FILE}" > "${BATS_TEST_TMPDIR}/received.txt"
     run cmp "${BATS_TEST_TMPDIR}/received.txt" "${text_file}"
@@ -203,7 +187,7 @@ _source_sdk() {
     mcp_send "${request}"
     run mcp_wait_for_response 1 30
     assert_equal "${status}" 0
-    _assert_result_text true "${expected}"
+    mcp_assert_tool_result_file "${output}" 1 true "${expected}"
 }
 
 @test "a tools list over 1.1 MB is answered whole on tools/list" {
@@ -228,11 +212,10 @@ _source_sdk() {
     mv "${BATS_TEST_TMPDIR}/tools.big.json" "${BATS_TEST_TMPDIR}/tools.json"
     _start_server ''
 
-    mcp_send '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"record_args","arguments":{"text":"aaa"}}}'
+    mcp_send "$(mcp_tools_call_request 1 record_args '{"text":"aaa"}')"
     run mcp_wait_for_response 1 30
     assert_equal "${status}" 0
-    run jq -c '[.result.isError, .result.content[0].text]' <<< "${output}"
-    assert_output '[false,"recorded"]'
+    mcp_assert_tool_result "${output}" 1 false "recorded"
 }
 
 @test "a server configuration over 1.1 MB is answered whole on initialize" {

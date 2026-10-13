@@ -433,11 +433,7 @@ teardown() {
 
     # 401's response is written before 402's, so the mid-call request was held
     # rather than run ahead of the call it arrived behind.
-    local stream
-    stream="$(<"${MCP_SERVER_OUT}")"
-    local before_401="${stream%%\"id\":401*}"
-    local before_402="${stream%%\"id\":402*}"
-    [[ ${#before_401} -lt ${#before_402} ]]
+    mcp_assert_response_order 401 402
 }
 
 @test "a queued ping is answered when a later notification cancels the call" {
@@ -1067,11 +1063,7 @@ teardown() {
     run jq -e '.id == 932 and has("result")' <<< "${output}"
     assert_success
 
-    local stream
-    stream="$(<"${MCP_SERVER_OUT}")"
-    local before_931="${stream%%\"id\":931*}"
-    local before_932="${stream%%\"id\":932*}"
-    [[ ${#before_931} -lt ${#before_932} ]]
+    mcp_assert_response_order 931 932
 }
 
 @test "a handoff fragment left open when the client closes stdin is discarded" {

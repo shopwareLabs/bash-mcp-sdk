@@ -20,6 +20,7 @@
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
+load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 
 setup() {
     MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
@@ -41,10 +42,6 @@ _initialize_request() {
 
 _tools_list_request() {
     jq -nc '{jsonrpc: "2.0", id: 2, method: "tools/list", params: {}}'
-}
-
-_ping_request() {
-    jq -nc '{jsonrpc: "2.0", id: 3, method: "ping", params: {}}'
 }
 
 # Answer <request> through process_request and assert the reply is a -32603
@@ -228,7 +225,7 @@ _assert_non_object_rejected() {
     # EXIT trap.
     printf '%s' '5' > "${MCP_TOOLS_LIST_FILE}"
     local out
-    out=$(printf '%s\n%s\n' "$(_tools_list_request)" "$(_ping_request)" \
+    out=$(printf '%s\n%s\n' "$(_tools_list_request)" "$(mcp_ping_request 3)" \
         | bash -c "source '${REPO_ROOT}/lib/mcpserver_core.sh'; ( run_mcp_server )" 2>/dev/null) || true
 
     # The tools/list is answered -32603 with a message naming the file it could

@@ -78,37 +78,15 @@ teardown() {
         HOOK_SLEEP_PID_FILE TOOL_MARKER MCP_SERVER_INSTANCE
 }
 
-# A tools/call line for tool <name> with <arguments-json> and request id <id>,
-# built with jq so the name and the arguments reach process_request as the JSON
-# they name.
-_call_request() {
-    local name="$1"
-    local arguments_json="$2"
-    local id="${3:-1}"
-    jq -nc --arg n "${name}" --argjson a "${arguments_json}" --argjson id "${id}" \
-        '{jsonrpc: "2.0", id: $id, method: "tools/call", params: {name: $n, arguments: $a}}'
-}
-
-# Assert <response> is a result for id 1 with isError <is-error> whose text is
-# exactly <text>.
-_assert_result_text() {
-    local response="$1"
-    local is_error="$2"
-    local text="$3"
-    run jq -e --argjson e "${is_error}" --arg t "${text}" \
-        '.id == 1 and .result.isError == $e and .result.content[0].text == $t and (.error == null)' <<< "${response}"
-    assert_success
-}
-
 # --- no hook ---
 
 @test "process_request: with no hook defined the tool result is the tool's output (guard: unchanged behavior)" {
     tool_x() { printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_result_text "${output}" false "tool output"
+    mcp_assert_tool_result "${output}" 1 false "tool output"
 }
 
 # --- a hook that succeeds ---
@@ -123,11 +101,11 @@ _assert_result_text() {
     }
     tool_x() { printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     assert [ -e "${hook_marker}" ]
-    _assert_result_text "${output}" false "tool output"
+    mcp_assert_tool_result "${output}" 1 false "tool output"
 }
 
 @test "process_request: a variable the hook assigns and a directory it changes to reach the tool" {
@@ -139,10 +117,10 @@ _assert_result_text() {
     }
     tool_x() { printf '%s %s\n' "${HOOK_STATE:-unset}" "${PWD}"; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_result_text "${output}" false "from-hook ${hook_dir}"
+    mcp_assert_tool_result "${output}" 1 false "from-hook ${hook_dir}"
 }
 
 @test "process_request: a function the hook defines still reaches the tool" {
@@ -153,13 +131,13 @@ _assert_result_text() {
     }
     tool_x() { rm -f "${BATS_TEST_TMPDIR}/no-such-file"; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     # The tool called `rm` and the hook's function answered it instead of the
     # utility. The SDK's own steps bypass functions, so this is the one place
     # the hook's definitions still land.
-    _assert_result_text "${output}" false ""
+    mcp_assert_tool_result "${output}" 1 false ""
     assert_equal "$(<"${hook_rm_file}")" "hook rm"
 }
 
@@ -178,13 +156,13 @@ _assert_result_text() {
     }
     tool_x() { : > "${tool_marker}"; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     # The hook returned 0, so the tool ran and the call succeeded: a
     # `hook-running` marker the hook's `rm` kept from being removed would have
     # answered "ended the call" instead.
-    _assert_result_text "${output}" false ""
+    mcp_assert_tool_result "${output}" 1 false ""
     assert [ -e "${tool_marker}" ]
     run mcp_count_call_roots "${TMPDIR}"
     assert_output "0"
@@ -196,7 +174,7 @@ _assert_result_text() {
     mcp_before_tool_call() { printf '%s\n%s\n' "$1" "$2" > "${hook_args_file}"; }
     tool_x() { printf '%s\n' "$1" > "${tool_args_file}"; }
 
-    run --separate-stderr process_request "$(_call_request x '{"n": 7}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{"n": 7}')"
 
     assert_success
     run jq -e '.result.isError == false' <<< "${output}"
@@ -215,10 +193,10 @@ _assert_result_text() {
     }
     tool_x() { printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')" < /dev/zero
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')" < /dev/zero
 
     assert_success
-    _assert_result_text "${output}" false "tool output"
+    mcp_assert_tool_result "${output}" 1 false "tool output"
     # Status 1 is EOF. A read from /dev/zero, the stdin this test hands
     # process_request, never sees a newline and times out above 128.
     assert_equal "$(<"${hook_log}")" "read status 1, ran past false"
@@ -230,7 +208,7 @@ _assert_result_text() {
     tool_inner() { printf 'inner done\n'; }
     tool_nested() { handle_tools_call 9001 '{"name":"inner","arguments":{}}' 2>/dev/null; }
 
-    run --separate-stderr process_request "$(_call_request nested '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 nested '{}')"
 
     assert_success
     run jq -e '.result.isError == false' <<< "${output}"
@@ -250,10 +228,10 @@ _assert_result_text() {
         printf 'tool output\n'
     }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_result_text "${output}" false "tool output"
+    mcp_assert_tool_result "${output}" 1 false "tool output"
     assert [ -e "${hook_marker}" ]
     assert_equal "$(<"${trap_log}")" "tool trap"
 }
@@ -263,7 +241,7 @@ _assert_result_text() {
     mcp_before_tool_call() { trap 'printf "hook trap\n" >> "${trap_log}"' EXIT; }
     tool_x() { printf 'tool ran\n' >> "${trap_log}"; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     assert_equal "$(<"${trap_log}")" "$(printf 'tool ran\nhook trap')"
@@ -286,11 +264,11 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
-    _assert_result_text "${output}" false "done"
+    mcp_assert_tool_result "${output}" 1 false "done"
 }
 
 @test "a hook stopped by the errexit it turned on ends the call, and the tool does not run" {
@@ -312,13 +290,13 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
     # The exact text proves the hook stopped at `false`: had it gone on, its
     # `continued` line would follow the message.
-    _assert_result_text "${output}" true \
+    mcp_assert_tool_result "${output}" 1 true \
         "mcp_before_tool_call ended the call instead of returning; tool x did not run."
     assert [ ! -e "${TOOL_MARKER}" ]
 }
@@ -339,11 +317,11 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
-    _assert_result_text "${output}" true "Error executing x: denied"
+    mcp_assert_tool_result "${output}" 1 true "Error executing x: denied"
     assert [ ! -e "${TOOL_MARKER}" ]
 }
 
@@ -366,11 +344,11 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
-    _assert_result_text "${output}" true \
+    mcp_assert_tool_result "${output}" 1 true \
         "mcp_before_tool_call ended the call instead of returning; tool x did not run."
     assert [ ! -e "${TOOL_MARKER}" ]
 }
@@ -393,11 +371,11 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
-    _assert_result_text "${output}" true \
+    mcp_assert_tool_result "${output}" 1 true \
         "$(printf 'mcp_before_tool_call ended the call instead of returning; tool x did not run.\nbefore')"
     assert [ ! -e "${TOOL_MARKER}" ]
 }
@@ -418,12 +396,12 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
-    run jq -e '.id == 1 and .result.isError == true and (.result.content[0].text | startswith("mcp_before_tool_call ended the call instead of returning; tool x did not run."))' <<< "${output}"
-    assert_success
+    mcp_assert_tool_result "${output}" 1 true \
+        "mcp_before_tool_call ended the call instead of returning; tool x did not run." prefix
     assert [ ! -e "${TOOL_MARKER}" ]
 }
 
@@ -447,11 +425,11 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
-    _assert_result_text "${output}" true \
+    mcp_assert_tool_result "${output}" 1 true \
         "mcp_before_tool_call ended with status 141 before returning (signal 13, or a command that failed with that status); tool x did not run."
     assert [ ! -e "${TOOL_MARKER}" ]
 }
@@ -471,11 +449,11 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
-    _assert_result_text "${output}" false "$(printf 'server-err\ndone')"
+    mcp_assert_tool_result "${output}" 1 false "$(printf 'server-err\ndone')"
 }
 
 @test "with a hook defined, the tool runs with the errtrace the server script turned on" {
@@ -495,11 +473,11 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
-    _assert_result_text "${output}" false "errtrace on"
+    mcp_assert_tool_result "${output}" 1 false "errtrace on"
 }
 
 @test "an ERR trap the hook installs reaches the tool" {
@@ -517,11 +495,11 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
-    _assert_result_text "${output}" false "$(printf 'hook-err\ndone')"
+    mcp_assert_tool_result "${output}" 1 false "$(printf 'hook-err\ndone')"
 }
 
 @test "process_request: a shopt option the hook sets does not reach the tool" {
@@ -532,11 +510,11 @@ BODY
         printf '%s\n' "${#matches[@]}"
     }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     # Without nullglob an unmatched glob stays one literal word.
-    _assert_result_text "${output}" false "1"
+    mcp_assert_tool_result "${output}" 1 false "1"
 }
 
 @test "a hook that runs set -o posix leaves expand_aliases, errtrace and posix as the tool had them" {
@@ -558,7 +536,7 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
@@ -566,7 +544,7 @@ BODY
     # snapshot's `set +o posix` turns expand_aliases off, so the tool sees it
     # on only when the shopt values are replayed after that line, and
     # errtrace on only when that replay leaves extdebug out.
-    _assert_result_text "${output}" false "expand_aliases=on errtrace=on posix=off"
+    mcp_assert_tool_result "${output}" 1 false "expand_aliases=on errtrace=on posix=off"
 }
 
 @test "a hook that runs set +o posix leaves inherit_errexit off and posix on as the tool had them" {
@@ -590,14 +568,14 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
     # set -o posix turns inherit_errexit on, so the snapshot taken with it
     # off only survives a restore that replays the shopt values after the
     # posix line.
-    _assert_result_text "${output}" false "inherit_errexit=off posix=on"
+    mcp_assert_tool_result "${output}" 1 false "inherit_errexit=off posix=on"
 }
 
 @test "a hook that runs set -o posix leaves errtrace and functrace off when extdebug is on" {
@@ -623,13 +601,13 @@ tool_x() {
 BODY
     mcp_start_server "${server}"
 
-    mcp_send "$(_call_request x '{}' 1)"
+    mcp_send "$(mcp_tools_call_request 1 x '{}')"
     run mcp_wait_for_response 1 5
 
     assert_success
     # The last restore pass replays the shopt snapshot, and replaying its
     # `shopt -s extdebug` line would turn errtrace and functrace back on.
-    _assert_result_text "${output}" false "extdebug=on errtrace=off functrace=off posix=off"
+    mcp_assert_tool_result "${output}" 1 false "extdebug=on errtrace=off functrace=off posix=off"
 }
 
 @test "process_request: variables the hook assigns do not change which tool runs, its arguments, or how the call is reported" {
@@ -658,14 +636,14 @@ BODY
         printf '%s noglob=%s\n' "$1" "${noglob}"
     }
 
-    run --separate-stderr process_request "$(_call_request x '{"n": 7}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{"n": 7}')"
 
     assert_success
     # The exact text proves the requested tool ran with the validated
     # arguments, that no snapshot string was executed, and that the call was
     # not answered as a refusal or as a hook that ended it; noglob=off proves
     # the restore ran from the SDK's own snapshot.
-    _assert_result_text "${output}" false '{"n":7} noglob=off'
+    mcp_assert_tool_result "${output}" 1 false '{"n":7} noglob=off'
     assert [ ! -e "${inner_marker}" ]
 }
 
@@ -679,7 +657,7 @@ BODY
     }
     tool_x() { printf 'done\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     # Nothing the SDK runs after the hook returns may reach for an external
@@ -687,7 +665,7 @@ BODY
     # marker that records the hook's return is never written, and a hook that
     # returned is answered as one that ended the call. The tool reaches for
     # builtins only, so it runs whatever PATH holds.
-    _assert_result_text "${output}" false "done"
+    mcp_assert_tool_result "${output}" 1 false "done"
 }
 
 @test "process_request: a hook that empties PATH and refuses is still answered as a refusal" {
@@ -700,10 +678,10 @@ BODY
     }
     tool_x() { : > "${tool_marker}"; printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_result_text "${output}" true "Error executing x: denied by policy"
+    mcp_assert_tool_result "${output}" 1 true "Error executing x: denied by policy"
     assert [ ! -e "${tool_marker}" ]
     run grep -cF "before-tool hook refused tool x (status 3)" "${MCP_LOG_FILE}"
     assert_output "1"
@@ -719,10 +697,10 @@ BODY
     }
     tool_x() { : > "${tool_marker}"; printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_result_text "${output}" true "Error executing x: denied by policy"
+    mcp_assert_tool_result "${output}" 1 true "Error executing x: denied by policy"
     assert [ ! -e "${tool_marker}" ]
 }
 
@@ -730,7 +708,7 @@ BODY
     mcp_before_tool_call() { return 3; }
     tool_x() { printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     run grep -cF "before-tool hook refused tool x (status 3)" "${MCP_LOG_FILE}"
@@ -746,10 +724,10 @@ BODY
     mcp_before_tool_call() { exit 0; }
     tool_x() { : > "${tool_marker}"; printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_result_text "${output}" true \
+    mcp_assert_tool_result "${output}" 1 true \
         "mcp_before_tool_call ended the call instead of returning; tool x did not run."
     assert [ ! -e "${tool_marker}" ]
 }
@@ -762,12 +740,12 @@ BODY
     }
     tool_x() { : > "${tool_marker}"; printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     # The captured output follows the message on its own line, with the trailing
     # newline the hook wrote stripped as a command substitution strips it.
-    _assert_result_text "${output}" true \
+    mcp_assert_tool_result "${output}" 1 true \
         "$(printf 'mcp_before_tool_call ended the call instead of returning; tool x did not run.\nX')"
     assert [ ! -e "${tool_marker}" ]
 }
@@ -777,10 +755,10 @@ BODY
     mcp_before_tool_call() { printf 'checked\n'; return 0; }
     tool_x() { : > "${tool_marker}"; printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_result_text "${output}" false "tool output"
+    mcp_assert_tool_result "${output}" 1 false "tool output"
     assert [ -e "${tool_marker}" ]
 }
 
@@ -795,7 +773,7 @@ BODY
         printf 'long=%s\n' "$(<"${long_pid_file}")"
     }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     local text
@@ -816,10 +794,10 @@ BODY
     }
     tool_x() { : > "${tool_marker}"; printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_result_text "${output}" true \
+    mcp_assert_tool_result "${output}" 1 true \
         "$(printf '%s\n%s' "mcp_before_tool_call ended with status 137 before returning (signal 9, or a command that failed with that status); tool x did not run." "about to be killed")"
     assert [ ! -e "${tool_marker}" ]
     run grep -qF "Before-tool hook mcp_before_tool_call for tool x ended with status 137 (signal 9, or a command that failed with that status)" "${MCP_LOG_FILE}"
@@ -831,10 +809,10 @@ BODY
     # before anything is collected from it.
     tool_x() { kill -9 "${BASHPID}"; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_result_text "${output}" true "Error executing x: "
+    mcp_assert_tool_result "${output}" 1 true "Error executing x: "
 }
 
 # --- calls the hook does not reach ---
@@ -844,7 +822,7 @@ BODY
     mcp_before_tool_call() { : > "${hook_marker}"; }
     tool_undeclared() { printf 'should not run\n'; }
 
-    run --separate-stderr process_request "$(_call_request undeclared '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 undeclared '{}')"
 
     assert_success
     run jq -e '.id == 1 and .error.code == -32601' <<< "${output}"
@@ -857,10 +835,10 @@ BODY
     mcp_before_tool_call() { : > "${hook_marker}"; }
     tool_x() { printf 'should not run\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{"n": "seven"}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{"n": "seven"}')"
 
     assert_success
-    _assert_result_text "${output}" true 'Invalid type(s): n expected integer, got string ("seven").'
+    mcp_assert_tool_result "${output}" 1 true 'Invalid type(s): n expected integer, got string ("seven").'
     assert [ ! -e "${hook_marker}" ]
 }
 
@@ -873,10 +851,10 @@ BODY
     PATH="${bin_dir}:${PATH}"
     tool_x() { printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_result_text "${output}" false "tool output"
+    mcp_assert_tool_result "${output}" 1 false "tool output"
     assert [ ! -e "${path_marker}" ]
 }
 
@@ -899,7 +877,7 @@ tool_blocked() {
 }
 BODY
     mcp_start_server "${server}"
-    mcp_send "$(_call_request blocked '{}' 41)"
+    mcp_send "$(mcp_tools_call_request 41 blocked '{}')"
     run mcp_wait_for_file "${HOOK_SLEEP_PID_FILE}" 5
     assert_success
     local sleep_pid

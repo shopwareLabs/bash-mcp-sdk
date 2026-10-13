@@ -17,6 +17,7 @@
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
+load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 
 CORE_SH="${REPO_ROOT}/lib/mcpserver_core.sh"
 
@@ -38,16 +39,15 @@ teardown() {
     unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT
 }
 
-# A tools/call line carrying <params-json> verbatim as the params value. The
-# value is built with `jq -nc --argjson` so a non-object params reaches
-# process_request as the JSON type it names.
-_call_request() {
+# A tools/call line with id 1 carrying <params-json> verbatim as the params
+# value. It stays beside mcp_tools_call_request because that builder always sends
+# an object params with a string name, and these cases send params that are not
+# an object, or an object whose name is absent or not a string. The value is
+# built with `jq -nc --argjson` so it reaches process_request as the JSON type it
+# names.
+_raw_params_request() {
     local params_json="$1"
     jq -nc --argjson p "${params_json}" '{jsonrpc: "2.0", id: 1, method: "tools/call", params: $p}'
-}
-
-_ping_request() {
-    jq -nc '{jsonrpc: "2.0", id: 2, method: "ping", params: {}}'
 }
 
 # --- process_request: a non-object params answers -32602 ---
@@ -73,15 +73,15 @@ _assert_non_object_params_rejected() {
 }
 
 @test "process_request: a numeric params answers -32602 Invalid params" {
-    _assert_non_object_params_rejected "$(_call_request '5')"
+    _assert_non_object_params_rejected "$(_raw_params_request '5')"
 }
 
 @test "process_request: a string params answers -32602 Invalid params" {
-    _assert_non_object_params_rejected "$(_call_request '"x"')"
+    _assert_non_object_params_rejected "$(_raw_params_request '"x"')"
 }
 
 @test "process_request: an array params answers -32602 Invalid params" {
-    _assert_non_object_params_rejected "$(_call_request '[1,2]')"
+    _assert_non_object_params_rejected "$(_raw_params_request '[1,2]')"
 }
 
 # --- run_mcp_server: the POSIX-mode crash regression ---
@@ -92,7 +92,7 @@ _assert_non_object_params_rejected() {
 # `.name` extraction ended the server under POSIX-mode errexit inheritance
 # before the ping was read.
 _session_input() {
-    printf '%s\n%s\n' "$(_call_request '5')" "$(_ping_request)"
+    printf '%s\n%s\n' "$(_raw_params_request '5')" "$(mcp_ping_request 2)"
 }
 
 @test "run_mcp_server: under set -o posix a non-object params is answered and the server survives to answer the next request" {
@@ -129,11 +129,11 @@ _session_input() {
 # object gate and answered `-32602 Invalid tool name: `.
 
 @test "process_request: a null params answers -32602 Invalid params" {
-    _assert_non_object_params_rejected "$(_call_request 'null')"
+    _assert_non_object_params_rejected "$(_raw_params_request 'null')"
 }
 
 @test "process_request: a false params answers -32602 Invalid params" {
-    _assert_non_object_params_rejected "$(_call_request 'false')"
+    _assert_non_object_params_rejected "$(_raw_params_request 'false')"
 }
 
 # --- process_request: a tools/call name that is not a string answers -32602 ---
@@ -148,7 +148,7 @@ _assert_non_string_name_rejected() {
     printf '%s\n' '{"tools": [{"name": "true", "inputSchema": {"type": "object"}}]}' > "${MCP_TOOLS_LIST_FILE}"
     tool_true() { : > "${marker}"; }
 
-    run --separate-stderr process_request "$(_call_request "${params_json}")"
+    run --separate-stderr process_request "$(_raw_params_request "${params_json}")"
 
     assert_success
     run jq -e '.id == 1 and .error.code == -32602 and .error.message == "Invalid params: name must be a string" and (.result == null)' <<< "${output}"
@@ -181,11 +181,10 @@ _assert_non_string_name_rejected() {
     printf '%s\n' '{"tools": [{"name": "true", "inputSchema": {"type": "object"}}]}' > "${MCP_TOOLS_LIST_FILE}"
     tool_true() { : > "${marker}"; printf 'ran true\n'; }
 
-    run --separate-stderr process_request "$(_call_request '{"name": "true", "arguments": {}}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 true '{}')"
 
     assert_success
-    run jq -e '.id == 1 and .result.isError == false and .result.content[0].text == "ran true"' <<< "${output}"
-    assert_success
+    mcp_assert_tool_result "${output}" 1 false "ran true"
     assert [ -e "${marker}" ]
 }
 

@@ -35,8 +35,9 @@
 # messages.
 #
 # Below the server helpers sit the ones every suite shares: polling waits for a
-# file, a process exit and a log line, and counters for a server's processes and
-# a call's root directories.
+# file, a process exit and a log line, counters for a server's processes and a
+# call's root directories, builders for the request lines a test sends, and
+# assertions on a tools/call result and on the order of two responses.
 
 # File descriptor holding the FIFO write end; 0 until mcp_start_server opens
 # it. Allocated dynamically (>10) because bats itself holds fd 3, and bats'
@@ -511,4 +512,152 @@ mcp_wait_for_call_roots() {
     fi
     _mcp_wait_for_count "call root(s) under ${dir}" exact "${want}" "${secs}" \
         mcp_count_call_roots "${dir}"
+}
+
+# --- request builders ---
+#
+# Each prints one JSON-RPC request line, built by jq from its arguments so a
+# name or a document reaches the server as the JSON it names, never as text
+# spliced into a template. The id is a required argument and is JSON: `7` for a
+# number, `'"a"'` for a string. An argument past the OS argument limit cannot
+# pass through jq's argv; a test that sends one builds its own line with
+# `--rawfile`.
+
+# Print a tools/call request for tool <name> with <arguments-json>.
+mcp_tools_call_request() {
+    if (( $# != 3 )); then
+        printf 'mcp_tools_call_request: usage: mcp_tools_call_request <id> <tool-name> <arguments-json>\n' >&2
+        return 1
+    fi
+    jq -nc --argjson id "$1" --arg name "$2" --argjson arguments "$3" \
+        '{jsonrpc: "2.0", id: $id, method: "tools/call", params: {name: $name, arguments: $arguments}}'
+}
+
+# Print a ping request.
+mcp_ping_request() {
+    if (( $# != 1 )); then
+        printf 'mcp_ping_request: usage: mcp_ping_request <id>\n' >&2
+        return 1
+    fi
+    jq -nc --argjson id "$1" '{jsonrpc: "2.0", id: $id, method: "ping"}'
+}
+
+# --- result and order assertions ---
+
+# Assert <response> answers request <id> with a result, no error member, whose
+# isError is <is-error> (`true` or `false`) and whose first content text is
+# <text>: the whole text when <match> is `exact` (the default), or its start
+# when <match> is `prefix`. On a mismatch print the expectation and the
+# response on stderr and return 1. The text travels through jq's argv, so it
+# must fit the OS argument limit; mcp_assert_tool_result_file takes a larger one.
+mcp_assert_tool_result() {
+    local response="${1:-}"
+    local id="${2:-}"
+    local is_error="${3:-}"
+    local text="${4:-}"
+    local match="${5:-exact}"
+    if (( $# < 4 || $# > 5 )) || [[ -z "${id}" ]]; then
+        printf 'mcp_assert_tool_result: usage: mcp_assert_tool_result <response> <id> <true|false> <text> [exact|prefix]\n' >&2
+        return 1
+    fi
+    case "${is_error}" in
+        true | false) ;;
+        *)
+            printf 'mcp_assert_tool_result: isError must be "true" or "false", got "%s"\n' "${is_error}" >&2
+            return 1
+            ;;
+    esac
+    case "${match}" in
+        exact | prefix) ;;
+        *)
+            printf 'mcp_assert_tool_result: the match must be "exact" or "prefix", got "%s"\n' "${match}" >&2
+            return 1
+            ;;
+    esac
+    if ! jq -e --argjson id "${id}" --argjson e "${is_error}" --arg t "${text}" --arg m "${match}" '
+        .id == $id and .result.isError == $e and (.error == null)
+        and (.result.content[0].text as $actual
+             | if $m == "exact" then $actual == $t else ($actual | startswith($t)) end)
+    ' <<< "${response}" > /dev/null 2>&1; then
+        printf 'mcp_assert_tool_result: the response does not match\n  expected: id %s, isError %s, text (%s match): %s\n  actual:   %s\n' \
+            "${id}" "${is_error}" "${match}" "${text}" "${response}" >&2
+        return 1
+    fi
+}
+
+# Assert <response> answers request <id> with a result, no error member, whose
+# isError is <is-error> (`true` or `false`) and whose first content text is
+# exactly the content of <expected-file>. The text never passes through argv, so
+# it may be of any size. On a mismatch print the sizes and the starts of both
+# sides on stderr and return 1.
+mcp_assert_tool_result_file() {
+    local response="${1:-}"
+    local id="${2:-}"
+    local is_error="${3:-}"
+    local expected_file="${4:-}"
+    local actual
+    if (( $# != 4 )) || [[ -z "${id}" || -z "${expected_file}" ]]; then
+        printf 'mcp_assert_tool_result_file: usage: mcp_assert_tool_result_file <response> <id> <true|false> <expected-file>\n' >&2
+        return 1
+    fi
+    case "${is_error}" in
+        true | false) ;;
+        *)
+            printf 'mcp_assert_tool_result_file: isError must be "true" or "false", got "%s"\n' "${is_error}" >&2
+            return 1
+            ;;
+    esac
+    if [[ ! -f "${expected_file}" ]]; then
+        printf 'mcp_assert_tool_result_file: no such expected file: %s\n' "${expected_file}" >&2
+        return 1
+    fi
+    if ! jq -e --argjson id "${id}" --argjson e "${is_error}" --rawfile t "${expected_file}" '
+        .id == $id and .result.isError == $e and (.error == null)
+        and .result.content[0].text == $t
+    ' <<< "${response}" > /dev/null 2>&1; then
+        actual="$(jq -c '{id, isError: .result.isError, error, text_chars: (.result.content[0].text | length), text_start: (.result.content[0].text[0:100])}' \
+            <<< "${response}" 2>/dev/null)" \
+            || actual="$(printf '%s' "${response}" | head -c 300)"
+        printf 'mcp_assert_tool_result_file: the response does not match\n  expected: id %s, isError %s, text of %s bytes in %s, starting: %s\n  actual:   %s\n' \
+            "${id}" "${is_error}" "$(( $(wc -c < "${expected_file}") ))" "${expected_file}" \
+            "$(head -c 100 "${expected_file}")" "${actual}" >&2
+        return 1
+    fi
+}
+
+# Assert the server's stdout (MCP_SERVER_OUT) holds the response for <first-id>
+# on an earlier line than the response for <second-id>. Fails, naming the
+# missing one, when either is absent. Each id is JSON, as for the builders.
+mcp_assert_response_order() {
+    local first="${1:-}"
+    local second="${2:-}"
+    local line
+    local n=0
+    local first_at=0
+    local second_at=0
+    if (( $# != 2 )) || [[ -z "${first}" || -z "${second}" ]]; then
+        printf 'mcp_assert_response_order: usage: mcp_assert_response_order <first-id> <second-id>\n' >&2
+        return 1
+    fi
+    if [[ ! -f "${MCP_SERVER_OUT:-}" ]]; then
+        printf 'mcp_assert_response_order: no server capture file: "%s"\n' "${MCP_SERVER_OUT:-}" >&2
+        return 1
+    fi
+    while IFS= read -r line; do
+        n=$(( n + 1 ))
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
+        if (( first_at == 0 )) && jq -e --argjson id "${first}" '.id == $id' <<< "${line}" > /dev/null 2>&1; then
+            first_at="${n}"
+        fi
+        if (( second_at == 0 )) && jq -e --argjson id "${second}" '.id == $id' <<< "${line}" > /dev/null 2>&1; then
+            second_at="${n}"
+        fi
+    done < "${MCP_SERVER_OUT}"
+    if (( first_at == 0 || second_at == 0 || first_at >= second_at )); then
+        printf 'mcp_assert_response_order: expected the response for id %s before the one for id %s\n  actual: the first is on line %s, the second on line %s (0 means no such response)\n' \
+            "${first}" "${second}" "${first_at}" "${second_at}" >&2
+        return 1
+    fi
 }
