@@ -994,20 +994,24 @@ handle_tools_call() {
         output=$(<"$output_file")
         # _mcp_run_tool writes `hook-returned` as soon as the hook returns,
         # whatever its status, so a `hook-running` with no `hook-returned` means
-        # the wrapper ended while the hook ran: the hook called `exit`, or a
-        # signal killed the wrapper. Either way the tool never ran. The capture
-        # is read only here, where nothing removed it.
+        # the wrapper ended while the hook ran: the hook called `exit`, its own
+        # errexit or nounset stopped it, or a signal killed the wrapper. In each
+        # case the tool never ran. The capture is read only here, where nothing
+        # removed it. A status above 128 names no single cause: `wait` reports
+        # death by signal N and an exit with status 128+N alike, and on bash
+        # 4.4 and 5.3 a hook that errexit stops at a command that failed with
+        # 141 exits with 141 (bash 4.1 to 4.3 exit with 1 there).
         # docs/architecture.md §Tool containment.
         if [[ -e "$call_root/hook-running" && ! -e "$call_root/hook-returned" ]]; then
             if [[ $exit_code -gt 128 ]]; then
-                hook_text="mcp_before_tool_call was killed by signal $((exit_code - 128)); tool $tool_name did not run."
-                log "ERROR" "Before-tool hook mcp_before_tool_call for tool $tool_name was killed (status $exit_code)"
+                hook_text="mcp_before_tool_call ended with status $exit_code before returning (signal $((exit_code - 128)), or a command that failed with that status); tool $tool_name did not run."
+                log "ERROR" "Before-tool hook mcp_before_tool_call for tool $tool_name ended with status $exit_code (signal $((exit_code - 128)), or a command that failed with that status)"
             else
                 hook_text="mcp_before_tool_call ended the call instead of returning; tool $tool_name did not run."
-                if [[ -s "$call_root/hook-output" ]]; then
-                    hook_text="${hook_text}"$'\n'"$(<"$call_root/hook-output")"
-                fi
                 log "ERROR" "Before-tool hook mcp_before_tool_call for tool $tool_name ended the call (status $exit_code)"
+            fi
+            if [[ -s "$call_root/hook-output" ]]; then
+                hook_text="${hook_text}"$'\n'"$(<"$call_root/hook-output")"
             fi
         elif [[ -e "$call_root/hook-refused" ]]; then
             hook_refused=1
@@ -1460,32 +1464,45 @@ _mcp_run_tool() {
     # executable or alias named mcp_before_tool_call never runs as the hook.
     if declare -F mcp_before_tool_call >/dev/null; then
         # $5 and $6 hold the shell option snapshots the restore below
-        # re-executes, and $7 the hook's status. They are positional so the
-        # hook cannot overwrite them.
-        set -- "$1" "$2" "$3" "$4" "$(set +o)" "$(shopt -p)"
+        # re-executes, $7 the ERR trap in force before the hook (empty when
+        # there is none), $8 the SDK's own ERR trap, and $9 the hook's status.
+        # They are positional so the hook cannot overwrite them.
+        set -- "$1" "$2" "$3" "$4" "$(set +o)" "$(shopt -p)" "$(trap -p ERR)"
         # The marker outlives the wrapper only when the hook never returned —
-        # it called `exit` or a signal killed the wrapper — which is what
-        # handle_tools_call answers for once the wrapper is reaped. A bare
-        # redirection, so no command name the hook could shadow — `:` included —
-        # is reached and no PATH lookup happens.
+        # it called `exit`, its errexit or nounset stopped it, or a signal killed
+        # the wrapper — which is what handle_tools_call answers for once the
+        # wrapper is reaped. A bare redirection, so no command name the hook
+        # could shadow — `:` included — is reached and no PATH lookup happens.
         # shellcheck disable=SC2188 # a commandless redirection is the point: any command name here is one the hook may have shadowed or taken off PATH.
         >"$4/hook-running"
+        # The hook is called as a plain statement, not an `if` condition: bash
+        # ignores errexit in every function called from a condition, so an
+        # errexit the hook turns on would not stop it at a failing command. A
+        # hook it does stop ends the wrapper before `hook-returned` is written,
+        # and is answered as one that called `exit`. A hook that returns
+        # non-zero with errexit on would end the wrapper the same way at this
+        # call: the ERR trap fires at the call in this function's frame and
+        # turns errexit off before it takes effect, so the status still reaches
+        # the refusal branch, unless the hook replaced the trap with its own.
+        # The FUNCNAME check keeps the trap from turning the hook's own errexit
+        # off when errtrace carries it into the hook. It replaces the server's
+        # ERR trap for the hook's duration, as the `if` condition the hook used
+        # to run in suppressed it, and is swapped back after the restore below.
+        builtin trap 'if [[ ${FUNCNAME[0]-} == _mcp_run_tool ]]; then builtin set +e; fi' ERR
+        builtin set -- "$@" "$(builtin trap -p ERR)"
         # A brace group, not a subshell: its redirection applies without a fork,
         # so what the hook sets survives into the tool call below. The capture
         # keeps a successful hook's output out of the tool result. The hook's
-        # status is appended as $7 on both branches. `builtin` keeps a function
-        # the hook defined named `set` from taking over the append.
-        if { mcp_before_tool_call "$2" "$3"; } >"$4/hook-output" 2>&1; then
-            builtin set -- "$@" 0
-        else
-            builtin set -- "$@" "$?"
-        fi
+        # status is appended as $9. `builtin` keeps a function the hook defined
+        # named `set` from taking over the append.
+        { mcp_before_tool_call "$2" "$3"; } >"$4/hook-output" 2>&1
+        builtin set -- "$@" "$?"
         # Every step below runs after the hook returned, so each one bypasses
         # what the hook may have changed: a function it defined named `set`,
         # `shopt` or `printf` must not take over the SDK's own steps, and a PATH
         # it rewrote must not decide whether those steps can run. Nothing below
         # reaches for an external command — each file is written with a bare
-        # redirection and the one command run is a builtin — so a hook that sets
+        # redirection and every command run is a builtin — so a hook that sets
         # PATH=/nonexistent leaves no marker behind. The restore re-executes the
         # snapshot with every command prefixed `builtin` for the same reason,
         # since the snapshot's own `set` and `shopt` calls would otherwise
@@ -1493,22 +1510,35 @@ _mcp_run_tool() {
         # deliberately not bypassed: a function the hook defines reaches the
         # tool. docs/server-contract.md §Running a step before every tool.
         # Restored before any step below runs, so an errexit or nounset the hook
-        # turned on governs neither those steps nor the tool.
-        builtin eval "builtin ${5//$'\n'/$'\n'builtin }"
+        # turned on governs neither those steps nor the tool. The `shopt`
+        # snapshot goes first: its `shopt -u extdebug` turns errtrace and
+        # functrace off, and the `set` snapshot then puts them back.
         builtin eval "builtin ${6//$'\n'/$'\n'builtin }"
+        builtin eval "builtin ${5//$'\n'/$'\n'builtin }"
+        # An ERR trap the hook installed and still in force stays, and reaches
+        # the tool when errtrace is on; otherwise the trap in force before the
+        # hook is put back. With errtrace off, bash 4.1 to 4.3 drop the hook's
+        # trap when it returns and leave the SDK's, so that branch runs there.
+        if [[ "$(builtin trap -p ERR)" == "$8" ]]; then
+            if [[ -n $7 ]]; then
+                builtin eval "builtin $7"
+            else
+                builtin trap - ERR
+            fi
+        fi
         # Written whatever the hook's status, and before the refusal branch: this
         # plus `hook-running` is what tells handle_tools_call the hook returned
         # rather than died. It is left in place with `hook-output`; the whole
         # root goes when the call does.
         # shellcheck disable=SC2188 # a commandless redirection is the point: any command name here is one the hook may have shadowed or taken off PATH.
         >"$4/hook-returned"
-        if [[ $7 -ne 0 ]]; then
+        if [[ $9 -ne 0 ]]; then
             # Tells handle_tools_call that the non-zero status is the hook's
             # refusal, not the tool's failure.
             # shellcheck disable=SC2188 # a commandless redirection is the point: any command name here is one the hook may have shadowed or taken off PATH.
             >"$4/hook-refused"
             builtin printf '%s' "$(<"$4/hook-output")"
-            builtin return "$7"
+            builtin return "$9"
         fi
     fi
     "$1" "$3"
