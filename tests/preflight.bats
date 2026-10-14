@@ -29,7 +29,8 @@ setup() {
 # floor; "env" is resolved through this test's own PATH before the swap.
 _source_core_with_path() {
     local path_value="$1"
-    run --separate-stderr env "PATH=${path_value}" "${BASH}" -c "source '${CORE_SH}'"
+    # shellcheck disable=SC2016 # the child bash expands "$1", so it stays literal here.
+    run --separate-stderr env "PATH=${path_value}" "${BASH}" -c 'source "$1"' _ "${CORE_SH}"
 }
 
 # Source the SDK under an arbitrary interpreter "$1", with stdout and stderr
@@ -38,7 +39,8 @@ _source_core_with_path() {
 # suite, and only the old-Bash case below needs a different interpreter.
 _source_core_with() {
     local interpreter="$1"
-    run --separate-stderr "${interpreter}" -c "source '${CORE_SH}'"
+    # shellcheck disable=SC2016 # the child shell expands "$1", so it stays literal here.
+    run --separate-stderr "${interpreter}" -c 'source "$1"' _ "${CORE_SH}"
 }
 
 # The first absolute-path Bash on this machine that reports a version below the
@@ -66,11 +68,9 @@ _find_bash_below_floor() {
 
 # Assert a predicate returns exactly 1 — not merely any non-zero status.
 # `refute <cmd>` treats every non-zero status as falsy, so a bare refute passes
-# vacuously when the command does not exist and the shell answers 127: the
-# refute-only predicate cases stayed green with the whole guard deleted. Driving
-# the call through `run` and checking the exact status makes a missing function
-# (127) fail the case, so the assertion pins the predicate rather than its
-# absence.
+# when the command does not exist and the shell answers 127. Checking the exact
+# status makes a missing function fail the case, so the assertion pins the
+# predicate rather than its absence.
 _assert_predicate_returns_1() {
     run "$@"
     [[ "${status}" -eq 1 ]] \
@@ -153,25 +153,14 @@ _assert_predicate_returns_1() {
 
 # --- sourcing refusals ---
 
-@test "sourcing refuses a jq below the 1.7 floor and names the version found" {
+@test "sourcing refuses a jq below the 1.7 floor on stderr alone, naming the version found" {
     put_stub_on_path jq 'printf "jq-1.6\n"'
 
     _source_core_with_path "${PATH}"
     assert_failure
     assert_stderr --partial "bash-mcp-sdk"
-    assert_stderr --partial "1.7"
-    assert_stderr --partial "jq-1.6"
-}
-
-@test "sourcing refuses a jq below the floor without writing to stdout" {
-    put_stub_on_path jq 'printf "jq-1.6\n"'
-
-    _source_core_with_path "${PATH}"
-    # The refusal is asserted here too, not only in the test above: without it
-    # this case passes against a file carrying no guard at all, because an
-    # untroubled source writes nothing to stdout either.
-    assert_failure
     assert_stderr --partial "jq 1.7 or newer is required"
+    assert_stderr --partial "jq-1.6"
     # Stdout carries the JSON-RPC stream; a refusal must not put a byte in it.
     assert_output ''
 }
@@ -204,6 +193,9 @@ _assert_predicate_returns_1() {
     mkdir -p "${empty}"
     _source_core_with_path "${empty}"
     assert_failure
+    # The absent refusal is what ran, so the missing warning below is its
+    # omission rather than a refusal that never happened.
+    assert_stderr --partial "jq was not found on PATH"
     refute_stderr --partial "may itself sit below the floor"
 }
 
@@ -348,39 +340,34 @@ _assert_predicate_returns_1() {
 
 # --- guard placement relative to the file's own `set -euo pipefail` ---
 
-@test "a refusal leaves the calling shell's errexit setting untouched" {
-    # The block sits above `set -euo pipefail` so a refusal returns non-zero
-    # without touching the calling shell's options. Moved below that line, the
-    # refusal would leave errexit active in a caller that never set it — which
-    # is why `$-` is what this pins. The sourcing shell here has errexit off,
-    # and `|| true` keeps it alive to report its options whether or not the
-    # block leaked `set -e`.
-    put_stub_on_path jq 'printf "jq-1.6\n"'
+# A bash script that sources the SDK named by its first argument, then prints
+# a `source=<status>` line, then the errexit, nounset and pipefail settings as
+# `set -o` / `set +o` lines. `|| rc=$?` records the source status without letting
+# errexit end the shell; `shopt -po` returns non-zero when any option is off,
+# which `|| true` absorbs.
+# shellcheck disable=SC2016 # the script is run by a child bash, so "$1" must stay literal here.
+_OPTIONS_PROBE='rc=0; source "$1" || rc=$?; printf "source=%s\n" "${rc}"
+shopt -po errexit nounset pipefail || true'
 
-    local probe
-    probe="source '${CORE_SH}' || true
-case \"\$-\" in *e*) printf 'errexit on\n' ;; *) printf 'errexit off\n' ;; esac"
+@test "a refusal leaves the calling shell's errexit, nounset and pipefail settings untouched" {
+    # The block sits above `set -euo pipefail` so a refusal returns non-zero
+    # without touching the calling shell's options; moved below that line, the
+    # refusal would leave them set in a caller that never set them. The sourcing
+    # shell here has all three off, and the probe reports them with the refusal status.
+    put_stub_on_path jq 'printf "jq-1.6\n"'
 
     # stderr is captured apart so the refusal's own lines do not land in
     # `output` alongside the option report.
-    run --separate-stderr env "PATH=${PATH}" "${BASH}" -c "${probe}"
-    assert_output 'errexit off'
+    run --separate-stderr env "PATH=${PATH}" "${BASH}" -c "${_OPTIONS_PROBE}" _ "${CORE_SH}"
+    assert_output $'source=1\nset +o errexit\nset +o nounset\nset +o pipefail'
     assert_stderr --partial "jq 1.7 or newer is required"
 }
 
-@test "a successful source adopts the file's own shell options" {
+@test "a successful source turns on errexit, nounset and pipefail in the calling shell" {
     # The counterpart to the refusal case above. The file runs `set -euo
-    # pipefail` below the guard, and a sourced file changes the sourcing shell,
-    # so a caller that sources successfully ends with errexit on. The guard
-    # returning before that line is what leaves only the refusal path's options
-    # as it found them.
-    local probe
-    probe="source '${CORE_SH}'
-case \"\$-\" in *e*) printf 'errexit on\n' ;; *) printf 'errexit off\n' ;; esac"
-
-    run env "PATH=${PATH}" "${BASH}" -c "${probe}"
-    assert_success
-    assert_output 'errexit on'
+    # pipefail` below the guard, and a sourced file changes the sourcing shell.
+    run env "PATH=${PATH}" "${BASH}" -c "${_OPTIONS_PROBE}" _ "${CORE_SH}"
+    assert_output $'source=0\nset -o errexit\nset -o nounset\nset -o pipefail'
 }
 
 # --- happy path ---

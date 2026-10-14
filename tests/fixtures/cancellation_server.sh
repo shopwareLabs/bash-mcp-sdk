@@ -6,8 +6,9 @@
 # is part of the SDK; consumers never see this file.
 #
 # The dispatcher calls every tool as `tool_<name> <arguments-json>`, so each
-# function receives the client's arguments as $1. Only tool_hooked_cancel
-# inspects its argument.
+# function receives the client's arguments as $1. No tool reads it; the cancel
+# hooks tool_hooked_cancel and tool_hooked_stubborn_cancel record the argument
+# they receive.
 set -euo pipefail
 
 # Resolve the repo root the way tests/test_helper/common_setup.bash does: walk
@@ -95,10 +96,10 @@ tool_hooked_stubborn() {
 }
 
 # The cancel hook for tool_hooked_stubborn. It appends rather than overwrites, so
-# a test can count how many times a shutdown ran it. Unlike tool_hooked_cancel it
-# takes no interest in its argument: a teardown driven by a signal passes an
-# empty string, because the in-flight record holds the tool's group and name and
-# no arguments.
+# a test can count how many times a shutdown ran it. It records its argument as
+# tool_hooked_cancel does, but a teardown driven by a signal passes an empty
+# string, because the in-flight record holds the tool's group and name and no
+# arguments.
 tool_hooked_stubborn_cancel() {
     printf '%s\n' "${1:-}" >> "${CANCEL_HOOK_FILE}"
 }
@@ -112,9 +113,8 @@ tool_hooked_cancel() {
     printf '%s\n' "${arguments}" > "${CANCEL_HOOK_FILE}"
 }
 
-# A cancellation hook that waits on a TERM-ignoring child. Its child pid lets a
-# test prove hook cleanup reaches the hook's process group rather than only the
-# hook shell.
+# A plain blocking tool whose cancellation hook, defined below, leaves a child
+# behind.
 tool_hooked_child() {
     if [[ -n "${SLOW_MARKER_FILE:-}" ]]; then
         printf 'started\n' > "${SLOW_MARKER_FILE}"
@@ -123,6 +123,9 @@ tool_hooked_child() {
     printf 'hooked child done\n'
 }
 
+# A cancellation hook that waits on a TERM-ignoring child. Its child pid lets a
+# test prove hook cleanup reaches the hook's process group rather than only the
+# hook shell.
 tool_hooked_child_cancel() {
     (
         trap '' TERM
@@ -210,8 +213,8 @@ tool_nested_dispatch() {
     handle_tools_call 9001 '{"name":"fast","arguments":{}}' 2>/dev/null
 }
 
-# Consumes one line from the server's stdin (the client's protocol pipe) and
-# reports it, so a test can show what a tool does to the stream.
+# Reads one line from its stdin and reports it, or `read:EOF` when the read
+# finds none, so a test can show whether a tool can reach the client's stream.
 tool_reads_stdin() {
     local line
     if IFS= read -r line; then

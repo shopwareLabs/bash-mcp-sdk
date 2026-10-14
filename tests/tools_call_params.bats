@@ -2,18 +2,18 @@
 # bats file_tags=mcp-core,tools-call-params
 # Pins handle_tools_call's refusal of a `tools/call` whose params is not a JSON
 # object, and the two behaviors that refusal buys:
-#   - the extraction of `.name` and `.arguments` only ever sees an object, so
-#     under `set -o posix` — where bash inherits errexit into command
-#     substitutions — a failed extraction cannot end the server;
-#   - jq's raw `Cannot index ...` diagnostics for a non-object params no longer
-#     reach the process's stderr, unrouted through `log`.
+#   - under `set -o posix`, where bash inherits errexit into command
+#     substitutions, the server answers the refused call and the next request;
+#   - a non-object params leaves nothing on the process's stderr, so no raw
+#     `Cannot index ...` jq diagnostic bypasses `log`.
 # It also pins the request members read by type rather than with jq's `//`:
 # a present `null` or `false` params, a non-string `name`, and a non-string
-# `method`, each answered rather than read as absent or as a name.
+# `method`, each answered rather than read as absent or as a name, and the
+# name, method and jsonrpc values that `jq -r` and command substitution would
+# alter.
 # Requests are driven through process_request and, for the server-loop cases,
-# through run_mcp_server, so the suite covers the real entry points.
-# Each section states what its cases answered before the change; a case marked
-# as a guard pins behavior the change keeps.
+# through run_mcp_server, so the suite covers the real entry points. A case
+# marked as a guard pins behavior the refusals leave in place.
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
@@ -44,14 +44,14 @@ _raw_params_request() {
 
 # --- process_request: a non-object params answers -32602 ---
 
-# Before the object gate, `params: 5`, `"x"` and `[1,2]` answered
-# `-32602 Invalid tool name: `.
+# One gate tests the params type, so a number stands for every non-object type
+# other than the `null` and `false` cases further down.
 
 # Answer <request> through process_request and assert the reply is a -32602
 # error envelope carrying the request's id and the params message. The response
 # is parsed with jq rather than compared as a string. stderr is dropped so the
-# response holds only the protocol line; the raw jq diagnostics a non-object
-# params used to produce are the subject of the server-loop case further down.
+# response holds only the protocol line; what reaches stderr is the subject of
+# a server-loop case further down.
 _assert_non_object_params_rejected() {
     local request="$1"
     local response
@@ -68,21 +68,11 @@ _assert_non_object_params_rejected() {
     _assert_non_object_params_rejected "$(_raw_params_request '5')"
 }
 
-@test "process_request: a string params answers -32602 Invalid params" {
-    _assert_non_object_params_rejected "$(_raw_params_request '"x"')"
-}
-
-@test "process_request: an array params answers -32602 Invalid params" {
-    _assert_non_object_params_rejected "$(_raw_params_request '[1,2]')"
-}
-
-# --- run_mcp_server: the POSIX-mode crash regression ---
+# --- run_mcp_server: a non-object params under the real server loop ---
 
 # The two-line session the server-loop cases below drive: a tools/call whose
-# params is not an object, then a ping. Both responses must arrive; a session
-# that answers only the first is the pre-change failure, where the failed
-# `.name` extraction ended the server under POSIX-mode errexit inheritance
-# before the ping was read.
+# params is not an object, then a ping. The ping's response shows the server
+# outlived the refused call.
 _session_input() {
     printf '%s\n%s\n' "$(_raw_params_request '5')" "$(mcp_ping_request 2)"
 }
@@ -92,33 +82,37 @@ _session_input() {
 
     # The server runs in a subshell, so run_mcp_server's EXIT trap lives and
     # dies there and no TAP line is lost to an EXIT-trap clobber.
-    session_output=$(_session_input | bash -c "set -o posix; source '${CORE_SH}'; ( run_mcp_server )" 2>/dev/null)
+    session_output=$(_session_input | bash -c 'set -o posix; source "$1"; ( run_mcp_server )' _ "${CORE_SH}" 2>/dev/null)
 
     # Both responses arrive. No exit status is asserted: it differs across bash
     # versions and is not what this pin is about.
     run jq -s -e '
-        (map(select(.id == 1)) | length == 1 and .[0].error.code == -32602)
+        (map(select(.id == 1)) | length == 1 and .[0].error == {code: -32602, message: "Invalid params: expected an object"})
         and (map(select(.id == 2)) | length == 1 and .[0].result == {})
     ' <<< "$session_output"
     assert_success
 }
 
-@test "run_mcp_server: a non-object params leaves no jq diagnostic on stderr" {
+@test "run_mcp_server: a non-object params is answered with nothing written to stderr" {
     local session_stderr
+    local session_stdout="${BATS_TEST_TMPDIR}/session.out"
 
-    # stderr is captured alone: the second redirection sends stdout to
-    # /dev/null after stderr has been duplicated onto the command substitution's
+    # stderr is captured alone: the second redirection sends stdout to the
+    # file after stderr has been duplicated onto the command substitution's
     # pipe, so only stderr is collected.
-    session_stderr=$(_session_input | bash -c "source '${CORE_SH}'; ( run_mcp_server )" 2>&1 >/dev/null)
+    session_stderr=$(_session_input | bash -c 'source "$1"; ( run_mcp_server )' _ "${CORE_SH}" 2>&1 >"${session_stdout}")
 
-    run printf '%s' "${session_stderr}"
-    refute_output --partial "Cannot index"
+    # Both responses arrive, so the empty stderr below comes from a server that
+    # handled the refused call rather than from one that never read it.
+    run jq -s -e 'map(.id) == [1, 2] and .[0].error.code == -32602 and .[1].result == {}' "${session_stdout}"
+    assert_success
+    assert_equal "${session_stderr}" ""
 }
 
 # --- process_request: a present null or false params is not an absent one ---
 
-# Read as `.params // {}`, a present `null` or `false` became `{}`, passed the
-# object gate and answered `-32602 Invalid tool name: `.
+# jq's `//` treats a present `null` or `false` as absent, so only a params read
+# by key presence lets the object gate see them.
 
 @test "process_request: a null params answers -32602 Invalid params" {
     _assert_non_object_params_rejected "$(_raw_params_request 'null')"
@@ -130,9 +124,8 @@ _session_input() {
 
 # --- process_request: a tools/call name that is not a string answers -32602 ---
 
-# Read as `.name // ""`, `null` and `false` answered `Invalid tool name: `, `5`
-# answered `Invalid tool name: 5`, and `true` printed as `true`, which passes the
-# identifier regex, so a tool declared as `true` ran. A tool named `true` is
+# `jq -r` prints `null`, `false` and `true` as words the identifier regex
+# accepts, so the name's type, not the regex, is what refuses a non-string name. A tool named `true` is
 # declared and implemented here so that dispatch would be observable.
 _assert_non_string_name_rejected() {
     local params_json="$1"
@@ -182,9 +175,8 @@ _assert_non_string_name_rejected() {
 
 # --- process_request: a method that is not a string ---
 
-# Read as `.method // ""`, a non-string method answered `-32601 Method not
-# found: ` (or `: 5`). JSON-RPC 2.0 §4 makes `method` a String, and its §7
-# examples answer `"method": 1` with -32600 Invalid Request.
+# JSON-RPC 2.0 §4 makes `method` a String, and its §7 examples answer
+# `"method": 1` with -32600 Invalid Request rather than -32601 Method not found.
 
 # A request line with id 1 whose `method` member is set from <method-json>, or
 # left out when <method-json> is empty.
@@ -223,7 +215,7 @@ _assert_non_string_method_rejected() {
     _assert_non_string_method_rejected "$(_method_request '')"
 }
 
-@test "process_request: a notification with a numeric method gets no response" {
+@test "process_request: a notification with a numeric method is logged as dropped and gets no response" {
     run --separate-stderr process_request "$(jq -nc '{jsonrpc: "2.0", method: 5}')"
 
     assert_success
@@ -234,9 +226,9 @@ _assert_non_string_method_rejected() {
 
 # --- process_request: a name, method or jsonrpc that does not survive capture ---
 
-# Captured with `$(... | jq -r ...)`, a name `"echo\n"` lost its newline and ran
-# `tool_echo`, a method `"ping\u0000"` lost its NUL and answered as ping, and a
-# `jsonrpc` of the number 2.0 printed as `2.0` and passed the version check.
+# A command substitution strips a trailing newline and bash drops a NUL, so a
+# name `"echo\n"` or a method `"ping\u0000"` read through `$(... | jq -r ...)`
+# would match `tool_echo` or ping, and `jq -r` prints the number 2.0 as `2.0`.
 
 @test "process_request: a tool name with a trailing newline or a NUL answers -32602 with the name JSON-encoded and does not run the tool" {
     local marker="${BATS_TEST_TMPDIR}/echo.ran"

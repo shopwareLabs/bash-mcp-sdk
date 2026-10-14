@@ -39,8 +39,8 @@
 # call's root directories, builders for the request lines a test sends, and
 # assertions on a tools/call result and on the order of two responses.
 
-# File descriptor holding the FIFO write end; 0 until mcp_start_server opens
-# it. Allocated dynamically (>10) because bats itself holds fd 3, and bats'
+# File descriptor holding the FIFO write end; empty until mcp_start_server
+# opens it. Allocated dynamically (>10) because bats itself holds fd 3, and bats'
 # tracing holds fd 4.
 MCP_CLIENT_FD=""
 MCP_CLIENT_FD_OPEN=0
@@ -77,10 +77,12 @@ _mcp_await_ready() {
     if ! mcp_send "{\"jsonrpc\":\"2.0\",\"id\":\"${ready_id}\",\"method\":\"ping\"}" 2>/dev/null; then
         reason="exited during startup (the ping could not be written)"
     else
-        local deadline=$(( SECONDS + timeout ))
+        local polls
+        local i
         local state
+        polls="$(_mcp_polls_for mcp_start_server "${timeout}")"
         reason="gave no ping answer within ${timeout}s"
-        while (( SECONDS < deadline )); do
+        for (( i = 0; i < polls; i++ )); do
             # The id is on the stream and the last byte is a newline, so the
             # response is whole: the comparison never sees a half-written line.
             if grep -qF "\"id\":\"${ready_id}\"" "${MCP_SERVER_OUT}" \
@@ -202,9 +204,11 @@ mcp_wait_for_response() {
         return 1
     fi
 
-    local deadline=$(( SECONDS + timeout ))
+    local polls
+    local i
     local line
-    while (( SECONDS < deadline )); do
+    polls="$(_mcp_polls_for mcp_wait_for_response "${timeout}")" || return 1
+    for (( i = 0; i < polls; i++ )); do
         while IFS= read -r line; do
             if [[ -z "${line}" ]]; then
                 continue
@@ -248,18 +252,27 @@ mcp_assert_no_response() {
 # Close stdin, TERM the server if it is still alive, reap it, and remove the
 # temp dir. Safe to call twice, and safe after a failed mcp_start_server. The
 # pid and capture paths are left in place so a caller can still assert on them.
+# A server still running 10s after the TERM is killed and the call fails, so a
+# server that does not stop fails the test instead of hanging it.
 mcp_stop_server() {
+    local rc=0
     mcp_close_stdin
 
     if [[ -n "${MCP_SERVER_PID:-}" ]] && kill -0 "${MCP_SERVER_PID}" 2>/dev/null; then
         kill -TERM "${MCP_SERVER_PID}" 2>/dev/null || true
+        if ! mcp_wait_for_exit "${MCP_SERVER_PID}" 10 2>/dev/null; then
+            printf 'mcp_stop_server: server %s was still running 10s after SIGTERM; sent SIGKILL\n' \
+                "${MCP_SERVER_PID}" >&2
+            kill -KILL "${MCP_SERVER_PID}" 2>/dev/null || true
+            rc=1
+        fi
         wait "${MCP_SERVER_PID}" 2>/dev/null || true
     fi
 
     if [[ -n "${MCP_CLIENT_TMPDIR:-}" && -d "${MCP_CLIENT_TMPDIR}" ]]; then
         rm -rf -- "${MCP_CLIENT_TMPDIR}"
     fi
-    return 0
+    return "${rc}"
 }
 
 # Start a server exactly as mcp_start_server does, but in a process group of its
@@ -272,8 +285,9 @@ mcp_stop_server() {
 mcp_start_server_isolated() {
     local rc=0
     set -m
-    mcp_start_server "$@"
-    rc=$?
+    # Collected with `||` so a failed start under errexit still turns monitor
+    # mode off before returning.
+    mcp_start_server "$@" || rc=$?
     set +m
     if [[ "${rc}" -ne 0 ]]; then
         return "${rc}"

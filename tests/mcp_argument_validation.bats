@@ -19,6 +19,7 @@ bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
 load "${BATS_TEST_DIRNAME}/test_helper/write_server"
+load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 
 setup() {
     mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
@@ -41,7 +42,7 @@ setup() {
     #            enum precedence
     #   badrange — wrong-typed bounds, refused by the shape check: a string
     #            bound, and the draft-04 boolean `exclusiveMinimum` modifier
-    #   options — the reported `options` schema: a schema-valued
+    #   options — an `options` schema: a schema-valued
     #            additionalProperties whose values must match one of three
     #            oneOf branches
     #   nested — o (object with its own required, enum, integer type and
@@ -240,23 +241,20 @@ setup() {
     # Dispatchable stubs that echo a marker so dispatch can be observed.
     tool_strict() { printf 'DISPATCHED:%s\n' "$1"; }
     tool_loose() { printf 'DISPATCHED:%s\n' "$1"; }
-    tool_typed() { printf 'DISPATCHED:%s\n' "$1"; }
-    tool_ranged() { printf 'DISPATCHED:%s\n' "$1"; }
 }
 
 # --- validate_tool_arguments: direct unit behavior ---
 
 @test "validate_tool_arguments: missing required field fails with its name" {
     run validate_tool_arguments "strict" '{"repo": "a/b"}'
-    assert_failure
-    assert_output --partial "Missing required parameter(s): number"
+    assert_failure 1
+    assert_output "Missing required parameter(s): number."
 }
 
 @test "validate_tool_arguments: unknown field fails and lists allowed parameters" {
     run validate_tool_arguments "strict" '{"number": "5", "pr": 339}'
-    assert_failure
-    assert_output --partial "Unknown parameter(s): pr"
-    assert_output --partial "Allowed parameters: mode, number, repo"
+    assert_failure 1
+    assert_output "Unknown parameter(s): pr. Allowed parameters: mode, number, repo."
 }
 
 @test "validate_tool_arguments: valid arguments pass with no output" {
@@ -286,31 +284,22 @@ setup() {
 
 @test "validate_tool_arguments: value outside the declared enum fails naming property, value, and allowed values" {
     run validate_tool_arguments "strict" '{"number": "5", "repo": "x/y"}'
-    assert_failure
-    assert_output --partial 'Invalid value(s):'
-    assert_output --partial 'repo="x/y"'
-    assert_output --partial '(allowed: a/b, c/d)'
+    assert_failure 1
+    assert_output 'Invalid value(s): repo="x/y" (allowed: a/b, c/d).'
 }
 
 @test "validate_tool_arguments: two invalid enum values in one call are both named in one message" {
     run validate_tool_arguments "strict" '{"number": "5", "repo": "x/y", "mode": "staging"}'
-    assert_failure
-    assert_output --partial 'repo="x/y"'
-    assert_output --partial '(allowed: a/b, c/d)'
-    assert_output --partial 'mode="staging"'
-    assert_output --partial '(allowed: development, production)'
+    assert_failure 1
+    assert_output 'Invalid value(s): mode="staging" (allowed: development, production); repo="x/y" (allowed: a/b, c/d).'
 }
 
 @test "validate_tool_arguments: a non-string value against a string enum fails on type, not enum" {
-    # `mode` declares both type:string and an enum. Type checking now runs
-    # before enum checking, so a non-string value is reported as a type
-    # mismatch (the more fundamental defect) rather than an enum mismatch —
-    # and does so without a jq error.
+    # `mode` declares both type:string and an enum; the type defect is the
+    # more fundamental one, so it is the one reported.
     run validate_tool_arguments "strict" '{"number": "5", "mode": 5}'
-    assert_failure
-    assert_output --partial 'Invalid type(s):'
-    assert_output --partial 'mode expected string, got number (5)'
-    refute_output --partial 'Invalid value(s)'
+    assert_failure 1
+    assert_output 'Invalid type(s): mode expected string, got number (5).'
 }
 
 @test "validate_tool_arguments: a property with an enum absent from the arguments passes" {
@@ -327,17 +316,24 @@ setup() {
 
 @test "validate_tool_arguments: missing required takes precedence over an invalid enum" {
     run validate_tool_arguments "strict" '{"repo": "x/y"}'
-    assert_failure
-    assert_output --partial "Missing required parameter(s): number"
-    refute_output --partial "Invalid value(s)"
+    assert_failure 1
+    assert_output "Missing required parameter(s): number."
+}
+
+@test "validate_tool_arguments: precedence — a missing required parameter is reported before an unknown one" {
+    run validate_tool_arguments "strict" '{"pr": 339}'
+    assert_failure 1
+    assert_output "Missing required parameter(s): number."
+}
+
+@test "validate_tool_arguments: precedence — an unknown parameter is reported before a type violation" {
+    # `number` declares string and gets a number; `pr` is undeclared.
+    run validate_tool_arguments "strict" '{"number": 5, "pr": 339}'
+    assert_failure 1
+    assert_output "Unknown parameter(s): pr. Allowed parameters: mode, number, repo."
 }
 
 # --- validate_tool_arguments: type, pattern, and array items ---
-# These constraints did not exist before this suite: a wrong-type, wrong-
-# pattern, or wrong-item-type/enum value in a schema-typed field was
-# previously accepted outright (the schema-driven validator only checked
-# required/additionalProperties/enum). Each test below fails against the
-# pre-fix validator and passes against the current one.
 
 @test "validate_tool_arguments: valid typed arguments pass with no output" {
     run validate_tool_arguments "typed" '{"name": "abc", "count": 5, "active": true, "tags": ["a", "b"]}'
@@ -347,54 +343,38 @@ setup() {
 
 @test "validate_tool_arguments: a string where an integer is declared is rejected" {
     run validate_tool_arguments "typed" '{"name": "abc", "count": "5"}'
-    assert_failure
-    assert_output --partial "Invalid type(s):"
-    assert_output --partial 'count expected integer, got string ("5")'
+    assert_failure 1
+    assert_output 'Invalid type(s): count expected integer, got string ("5").'
 }
 
 @test "validate_tool_arguments: a non-integer number where an integer is declared is rejected" {
     run validate_tool_arguments "typed" '{"name": "abc", "count": 5.5}'
-    assert_failure
-    assert_output --partial "count expected integer, got number (non-integer) (5.5)"
-}
-
-@test "validate_tool_arguments: a whole-valued number satisfies a declared integer type" {
-    run validate_tool_arguments "typed" '{"name": "abc", "count": 5}'
-    assert_success
-    assert_output ""
+    assert_failure 1
+    assert_output "Invalid type(s): count expected integer, got number (non-integer) (5.5)."
 }
 
 @test "validate_tool_arguments: a string where a boolean is declared is rejected" {
     run validate_tool_arguments "typed" '{"name": "abc", "active": "true"}'
-    assert_failure
-    assert_output --partial 'active expected boolean, got string ("true")'
+    assert_failure 1
+    assert_output 'Invalid type(s): active expected boolean, got string ("true").'
 }
 
 @test "validate_tool_arguments: a value violating pattern is rejected and names the pattern" {
     run validate_tool_arguments "typed" '{"name": "ABC"}'
-    assert_failure
-    assert_output --partial 'Invalid value(s):'
-    assert_output --partial 'name="ABC" does not match pattern ^[a-z]+$'
-}
-
-@test "validate_tool_arguments: a value matching pattern passes" {
-    run validate_tool_arguments "typed" '{"name": "abc"}'
-    assert_success
-    assert_output ""
+    assert_failure 1
+    assert_output 'Invalid value(s): name="ABC" does not match pattern ^[a-z]+$.'
 }
 
 @test "validate_tool_arguments: an array item of the wrong type is rejected and names the index" {
     run validate_tool_arguments "typed" '{"name": "abc", "tags": ["a", 5]}'
-    assert_failure
-    assert_output --partial "Invalid array item(s):"
-    assert_output --partial 'tags[1] expected string, got number (5)'
+    assert_failure 1
+    assert_output 'Invalid array item(s): tags[1] expected string, got number (5).'
 }
 
 @test "validate_tool_arguments: an array item outside the declared item enum is rejected and names the index" {
     run validate_tool_arguments "typed" '{"name": "abc", "tags": ["a", "z"]}'
-    assert_failure
-    assert_output --partial "Invalid array item(s):"
-    assert_output --partial 'tags[1]="z" (allowed: a, b, c)'
+    assert_failure 1
+    assert_output 'Invalid array item(s): tags[1]="z" (allowed: a, b, c).'
 }
 
 @test "validate_tool_arguments: every array item matching type and enum passes" {
@@ -403,12 +383,9 @@ setup() {
     assert_output ""
 }
 
-# Regression: `items` declaring only `type` (no `enum`), or only `enum` (no
-# `type`), independently. A prior revision bound both via `// empty`, and
-# `X as $v | BODY` runs BODY zero times when X produces zero outputs — so
-# whichever of the two keys was absent silently discarded every element,
-# including violations of the key that *was* declared. These two schemas
-# each declare exactly one of the pair, so each pins its own key.
+# Regression: `X // empty as $v | BODY` runs BODY zero times when X is absent,
+# so a check binding `type` and `enum` together would skip every element of an
+# `items` declaring only one of them. Each schema below declares exactly one.
 @test "validate_tool_arguments: an items schema declaring only type (no enum) still catches a type violation" {
     write_fixture_files '{
   "tools": [
@@ -424,9 +401,8 @@ setup() {
   ]
 }'
     run validate_tool_arguments "counts" '{"values": [1, "not-a-number"]}'
-    assert_failure
-    assert_output --partial "Invalid array item(s):"
-    assert_output --partial 'values[1] expected integer, got string ("not-a-number")'
+    assert_failure 1
+    assert_output 'Invalid array item(s): values[1] expected integer, got string ("not-a-number").'
 }
 
 @test "validate_tool_arguments: an items schema declaring only enum (no type) still catches an enum violation" {
@@ -444,13 +420,12 @@ setup() {
   ]
 }'
     run validate_tool_arguments "colors" '{"values": ["red", "purple"]}'
-    assert_failure
-    assert_output --partial "Invalid array item(s):"
-    assert_output --partial 'values[1]="purple" (allowed: red, green, blue)'
+    assert_failure 1
+    assert_output 'Invalid array item(s): values[1]="purple" (allowed: red, green, blue).'
 }
 
-# Regression: membership was tested with jq `index`, which on an array value
-# is a subsequence search, so an array made of allowed members was accepted.
+# Regression: jq `index` on an array value is a subsequence search, so a
+# membership test built on it accepts an array made of allowed members.
 @test "validate_tool_arguments: an array value made of enum members is rejected by a property enum" {
     write_fixture_files '{
   "tools": [
@@ -506,45 +481,20 @@ setup() {
 @test "validate_tool_arguments: type precedence — a type violation is reported before an unrelated pattern violation" {
     # count is wrong-typed; name's pattern also fails. Type is reported first.
     run validate_tool_arguments "typed" '{"name": "ABC", "count": "5"}'
-    assert_failure
-    assert_output --partial "Invalid type(s):"
-    refute_output --partial "does not match pattern"
+    assert_failure 1
+    assert_output 'Invalid type(s): count expected integer, got string ("5").'
 }
 
 @test "validate_tool_arguments: type precedence — required is still reported ahead of a type violation" {
     run validate_tool_arguments "typed" '{"count": "5"}'
-    assert_failure
-    assert_output --partial "Missing required parameter(s): name"
-    refute_output --partial "Invalid type(s)"
-}
-
-@test "validate_tool_arguments: a reproduction of the reported defect — a number where a string field is declared is now rejected" {
-    # The originally reported defect: a tool schema declares a field as
-    # type:string (e.g. get_rules' "ids"), and a caller passes a JSON number
-    # instead. Previously accepted outright because the validator never read
-    # `.type`. "name" here plays that role: type:string, given a number.
-    run validate_tool_arguments "typed" '{"name": 12345}'
-    assert_failure
-    assert_output --partial "Invalid type(s):"
-    assert_output --partial "name expected string, got number (12345)"
-}
-
-@test "validate_tool_arguments: required, additionalProperties, and enum are unaffected on an untyped tool" {
-    # Regression: the pre-existing constraints on the "strict" and "loose"
-    # fixtures (no type/pattern/items declared on their properties beyond
-    # what earlier tests already cover) still behave exactly as before.
-    run validate_tool_arguments "strict" '{"number": "5", "repo": "a/b", "mode": "production"}'
-    assert_success
-    assert_output ""
+    assert_failure 1
+    assert_output "Missing required parameter(s): name."
 }
 
 # --- validate_tool_arguments: a `type` declared as a list of alternatives ---
 
-# JSON Schema allows `"type": ["integer", "string"]` to mean "either". The
-# validator once read the list form as "no type constraint" — the guard that
-# selected a property for type checking required `type` to be a string, so an
-# array-valued `type` dropped the property before any comparison ran, and
-# every value passed. `items.type` carried the identical guard.
+# JSON Schema allows `"type": ["integer", "string"]` to mean "either", at a
+# property and in `items` alike.
 
 @test "validate_tool_arguments: a union type accepts a value matching its integer member" {
     run validate_tool_arguments "union" '{"count": 5}'
@@ -561,9 +511,8 @@ setup() {
 _assert_union_rejects() {
     local arguments="$1" expected_actual="$2"
     run validate_tool_arguments "union" "${arguments}"
-    assert_failure
-    assert_output --partial "Invalid type(s):"
-    assert_output --partial "count expected integer or string, got ${expected_actual}"
+    assert_failure 1
+    assert_output "Invalid type(s): count expected integer or string, got ${expected_actual}."
 }
 
 @test "validate_tool_arguments: an object outside a union type is rejected naming both alternatives" {
@@ -587,14 +536,10 @@ _assert_union_rejects() {
 }
 
 @test "validate_tool_arguments: a value outside a single-member union type fails on type, not enum" {
-    # The scalar-form counterpart above pins the same precedence. Under a list
-    # form the type check once never ran at all, so the value was reported as
-    # an enum violation instead.
+    # The list-form counterpart of the scalar-type precedence case above.
     run validate_tool_arguments "union" '{"choice": 7}'
-    assert_failure
-    assert_output --partial "Invalid type(s):"
-    assert_output --partial 'choice expected string, got number (7)'
-    refute_output --partial 'Invalid value(s)'
+    assert_failure 1
+    assert_output 'Invalid type(s): choice expected string, got number (7).'
 }
 
 @test "validate_tool_arguments: array items declaring a union type accept every declared member" {
@@ -605,49 +550,18 @@ _assert_union_rejects() {
 
 @test "validate_tool_arguments: an array item outside a union items type is rejected and names the index" {
     run validate_tool_arguments "union" '{"values": [1, true]}'
-    assert_failure
-    assert_output --partial "Invalid array item(s):"
-    assert_output --partial 'values[1] expected integer or string, got boolean (true)'
+    assert_failure 1
+    assert_output 'Invalid array item(s): values[1] expected integer or string, got boolean (true).'
 }
 
-# The `malformed` schema carries four wrong-typed `type` lists, so every call
-# against it is refused with all four named in tree order, whichever argument
-# the call sends. These four calls ran with the list left unenforced before
-# the shape check.
-MALFORMED_TYPE_MESSAGE="Cannot validate arguments for malformed: its inputSchema keyword(s) have the wrong type: properties.empty.type must be a string or a non-empty array of strings; properties.emptyitems.items.type must be a string or a non-empty array of strings; properties.mixed.type must be a string or a non-empty array of strings; properties.mixeditems.items.type must be a string or a non-empty array of strings."
-
-@test "validate_tool_arguments: an empty type list is refused as wrong-typed" {
+@test "validate_tool_arguments: an empty or non-string type list is refused as wrong-typed, at a property and in items" {
+    # The schema is refused whatever the call sends, so one call names all four.
     run validate_tool_arguments "malformed" '{"empty": true}'
     assert_failure 1
-    assert_output "${MALFORMED_TYPE_MESSAGE}"
-}
-
-@test "validate_tool_arguments: a type list carrying a non-string member is refused as wrong-typed" {
-    run validate_tool_arguments "malformed" '{"mixed": true}'
-    assert_failure 1
-    assert_output "${MALFORMED_TYPE_MESSAGE}"
-}
-
-@test "validate_tool_arguments: an empty items type list is refused as wrong-typed" {
-    run validate_tool_arguments "malformed" '{"emptyitems": [true, {"a": 1}]}'
-    assert_failure 1
-    assert_output "${MALFORMED_TYPE_MESSAGE}"
-}
-
-@test "validate_tool_arguments: an items type list carrying a non-string member is refused as wrong-typed" {
-    run validate_tool_arguments "malformed" '{"mixeditems": [true, {"a": 1}]}'
-    assert_failure 1
-    assert_output "${MALFORMED_TYPE_MESSAGE}"
+    assert_output "Cannot validate arguments for malformed: its inputSchema keyword(s) have the wrong type: properties.empty.type must be a string or a non-empty array of strings; properties.emptyitems.items.type must be a string or a non-empty array of strings; properties.mixed.type must be a string or a non-empty array of strings; properties.mixeditems.items.type must be a string or a non-empty array of strings."
 }
 
 # --- validate_tool_arguments: numeric range keywords ---
-
-# The validator read no range keyword at all: `minimum`, `maximum`,
-# `exclusiveMinimum` and `exclusiveMaximum` were declared by consumer schemas
-# and never enforced, so `{"limit": -1}` against `minimum: 1` was accepted and
-# failed downstream instead. No input below produced a range diagnostic
-# pre-change: an out-of-range value was accepted outright unless the call
-# violated one of the constraints that were enforced.
 
 @test "validate_tool_arguments: a value equal to minimum is accepted" {
     run validate_tool_arguments "ranged" '{"limit": 1}'
@@ -663,19 +577,19 @@ MALFORMED_TYPE_MESSAGE="Cannot validate arguments for malformed: its inputSchema
 
 @test "validate_tool_arguments: a value below minimum is rejected naming property, value, and bound" {
     run validate_tool_arguments "ranged" '{"limit": 0}'
-    assert_failure
+    assert_failure 1
     assert_output "Out-of-range value(s): limit=0 below minimum 1."
 }
 
 @test "validate_tool_arguments: a value above maximum is rejected naming property, value, and bound" {
     run validate_tool_arguments "ranged" '{"limit": 999}'
-    assert_failure
+    assert_failure 1
     assert_output "Out-of-range value(s): limit=999 above maximum 50."
 }
 
 @test "validate_tool_arguments: exclusiveMinimum rejects a value equal to the bound" {
     run validate_tool_arguments "ranged" '{"above": 0}'
-    assert_failure
+    assert_failure 1
     assert_output "Out-of-range value(s): above=0 not above exclusiveMinimum 0."
 }
 
@@ -687,7 +601,7 @@ MALFORMED_TYPE_MESSAGE="Cannot validate arguments for malformed: its inputSchema
 
 @test "validate_tool_arguments: exclusiveMaximum rejects a value equal to the bound" {
     run validate_tool_arguments "ranged" '{"below": 100}'
-    assert_failure
+    assert_failure 1
     assert_output "Out-of-range value(s): below=100 not below exclusiveMaximum 100."
 }
 
@@ -699,23 +613,16 @@ MALFORMED_TYPE_MESSAGE="Cannot validate arguments for malformed: its inputSchema
 
 @test "validate_tool_arguments: a non-integer number is checked against the bound like any other number" {
     run validate_tool_arguments "ranged" '{"score": 0.5}'
-    assert_failure
-    assert_output --partial "score=0.5 below minimum 1"
+    assert_failure 1
+    assert_output "Out-of-range value(s): score=0.5 below minimum 1."
 }
 
-@test "validate_tool_arguments: a reproduction of the reported defect — a negative value against minimum 1 is now rejected" {
-    # The originally reported defect: a consumer schema declares `minimum: 1`
-    # on a pagination or truncation limit and a caller passes -1. Previously
-    # accepted outright, then applied downstream as `per_page=-1`.
-    run validate_tool_arguments "ranged" '{"limit": -1}'
-    assert_failure
-    assert_output --partial "limit=-1 below minimum 1"
-}
-
-@test "validate_tool_arguments: a string value with minimum declared is left unenforced" {
+@test "validate_tool_arguments: a string value with maximum declared is left unenforced" {
     # A range keyword must not start rejecting strings where no type is
-    # declared; where one is, the type check has already reported the defect.
-    run validate_tool_arguments "ranged" '{"untyped": "ab"}'
+    # declared. jq orders every string above every number, so `maximum` is the
+    # bound a string would fail if the number gate let it through.
+    _write_one_tool '{"type": "object", "properties": {"x": {"maximum": 3}}}'
+    run validate_tool_arguments "one" '{"x": "ab"}'
     assert_success
     assert_output ""
 }
@@ -732,61 +639,62 @@ MALFORMED_TYPE_MESSAGE="Cannot validate arguments for malformed: its inputSchema
     # The counterpart to the two cases above: the number gate skips other
     # types, it does not disable the bound on the property.
     run validate_tool_arguments "ranged" '{"untyped": 2}'
-    assert_failure
-    assert_output --partial "untyped=2 below minimum 3"
-}
-
-# Both calls ran with the bound left unenforced before the shape check.
-BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keyword(s) have the wrong type: properties.draft04.exclusiveMinimum must be a number; properties.stringbound.minimum must be a number."
-
-@test "validate_tool_arguments: a string bound is refused as wrong-typed" {
-    run validate_tool_arguments "badrange" '{"stringbound": 1}'
     assert_failure 1
-    assert_output "${BADRANGE_MESSAGE}"
+    assert_output "Out-of-range value(s): untyped=2 below minimum 3."
 }
 
-@test "validate_tool_arguments: the draft-04 boolean form of exclusiveMinimum is refused as wrong-typed" {
+@test "validate_tool_arguments: a string bound and the draft-04 boolean exclusiveMinimum are refused as wrong-typed" {
     # draft-04 spelled the exclusive bound as a modifier on `minimum`. This
     # validator implements only the numeric form, so the boolean is refused
-    # rather than read as a bound.
-    run validate_tool_arguments "badrange" '{"draft04": 0}'
+    # rather than read as a bound. The schema is refused whatever the call
+    # sends, so one call names both.
+    run validate_tool_arguments "badrange" '{"stringbound": 1}'
     assert_failure 1
-    assert_output "${BADRANGE_MESSAGE}"
+    assert_output "Cannot validate arguments for badrange: its inputSchema keyword(s) have the wrong type: properties.draft04.exclusiveMinimum must be a number; properties.stringbound.minimum must be a number."
 }
 
 @test "validate_tool_arguments: two out-of-range properties in one call are both named in one message" {
     run validate_tool_arguments "ranged" '{"above": 0, "limit": 999}'
-    assert_failure
+    assert_failure 1
     assert_output "Out-of-range value(s): above=0 not above exclusiveMinimum 0; limit=999 above maximum 50."
 }
 
 @test "validate_tool_arguments: range precedence — a type violation is reported before a range violation on the same value" {
     # 0.5 fails both: `limit` declares integer, and 0.5 is below minimum 1.
     run validate_tool_arguments "ranged" '{"limit": 0.5}'
-    assert_failure
-    assert_output --partial "limit expected integer, got number (non-integer) (0.5)"
-    refute_output --partial "Out-of-range"
+    assert_failure 1
+    assert_output "Invalid type(s): limit expected integer, got number (non-integer) (0.5)."
 }
 
 @test "validate_tool_arguments: range precedence — a pattern violation is reported before an unrelated range violation" {
     run validate_tool_arguments "ranged" '{"name": "ABC", "limit": 0}'
-    assert_failure
-    assert_output --partial "does not match pattern"
-    refute_output --partial "Out-of-range"
+    assert_failure 1
+    assert_output 'Invalid value(s): name="ABC" does not match pattern ^[a-z]+$.'
 }
 
 @test "validate_tool_arguments: range precedence — a range violation is reported before an unrelated items violation" {
     run validate_tool_arguments "ranged" '{"limit": 0, "tags": [7]}'
-    assert_failure
-    assert_output --partial "limit=0 below minimum 1"
-    refute_output --partial "Invalid array item(s)"
+    assert_failure 1
+    assert_output "Out-of-range value(s): limit=0 below minimum 1."
 }
 
 @test "validate_tool_arguments: range precedence — a range violation is reported before an unrelated enum violation" {
     run validate_tool_arguments "ranged" '{"limit": 0, "mode": "z"}'
-    assert_failure
-    assert_output --partial "limit=0 below minimum 1"
-    refute_output --partial "mode="
+    assert_failure 1
+    assert_output "Out-of-range value(s): limit=0 below minimum 1."
+}
+
+@test "validate_tool_arguments: precedence — an items violation is reported before an unrelated enum violation" {
+    run validate_tool_arguments "ranged" '{"tags": [7], "mode": "z"}'
+    assert_failure 1
+    assert_output "Invalid array item(s): tags[0] expected string, got number (7)."
+}
+
+@test "validate_tool_arguments: precedence — an enum violation is reported before an unrelated oneOf violation" {
+    _write_one_tool '{"type": "object", "properties": {"e": {"enum": ["a"]}, "o": {"oneOf": [{"type": "string"}]}}}'
+    run validate_tool_arguments "one" '{"e": "z", "o": 5}'
+    assert_failure 1
+    assert_output 'Invalid value(s): e="z" (allowed: a).'
 }
 
 @test "validate_tool_arguments: a property carrying a bound and absent from the arguments is not reported" {
@@ -797,30 +705,22 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
 
 # --- validate_tool_arguments: a declared integer against a large literal ---
 
-# The whole-value check ran `val == (val | floor)`, and `floor` converts its
-# input to an IEEE-754 double. At or above 2^52 = 4503599627370496 the double
-# spacing reaches 1, so `4503599627370496.5` was already whole before the
-# comparison ran and the fractional value was accepted outright — then passed
-# to the tool function with its fraction intact. The check now also reads the
-# number as jq renders it, which still carries the fraction. Each rejection
-# case at or above the threshold was accepted outright pre-change; the
-# precedence case was rejected pre-change as an out-of-range value, so only its
-# diagnostic category changes; the two small-fraction cases were rejected
-# pre-change and pin that the added conjunct did not displace the value test.
-# Every acceptance case was accepted pre-change too and pins that the added
-# conjunct rejects nothing that is an integer under JSON Schema.
+# `floor` converts its input to an IEEE-754 double, and at or above 2^52 =
+# 4503599627370496 the double spacing reaches 1, so `val == (val | floor)`
+# alone reads `4503599627370496.5` as whole. The rejection cases at that size
+# pin the test on the number as jq renders it; the acceptance cases pin that
+# it rejects nothing that is an integer under JSON Schema.
 
 @test "validate_tool_arguments: a fractional literal at 2^52 where an integer is declared is rejected" {
     run validate_tool_arguments "typed" '{"name": "abc", "count": 4503599627370496.5}'
-    assert_failure
-    assert_output --partial "Invalid type(s):"
-    assert_output --partial "count expected integer, got number (non-integer) (4503599627370496.5)"
+    assert_failure 1
+    assert_output "Invalid type(s): count expected integer, got number (non-integer) (4503599627370496.5)."
 }
 
 @test "validate_tool_arguments: a negative fractional literal at 2^52 where an integer is declared is rejected" {
     run validate_tool_arguments "typed" '{"name": "abc", "count": -4503599627370496.5}'
-    assert_failure
-    assert_output --partial "count expected integer, got number (non-integer) (-4503599627370496.5)"
+    assert_failure 1
+    assert_output "Invalid type(s): count expected integer, got number (non-integer) (-4503599627370496.5)."
 }
 
 @test "validate_tool_arguments: the whole value at 2^52 satisfies a declared integer type" {
@@ -830,18 +730,12 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
 }
 
 @test "validate_tool_arguments: an odd whole value above 2^53 satisfies a declared integer type" {
-    # 9007199254740993 has no exact double, so a check deciding from the
-    # rounded value alone would have to guess. Reading the literal keeps it
-    # accepted.
+    # 9007199254740993 has no exact double; its rounded double and its literal
+    # are both whole, so neither the `floor` test nor the literal test may
+    # reject it.
     run validate_tool_arguments "typed" '{"name": "abc", "count": 9007199254740993}'
     assert_success
     assert_output ""
-}
-
-@test "validate_tool_arguments: a small non-integer where an integer is declared is rejected unchanged" {
-    run validate_tool_arguments "typed" '{"name": "abc", "count": 1.5}'
-    assert_failure
-    assert_output --partial "count expected integer, got number (non-integer) (1.5)"
 }
 
 @test "validate_tool_arguments: an exponent-rendered fraction where an integer is declared is rejected by the value test" {
@@ -849,8 +743,8 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
     # reaches only the `floor` comparison. This is the case that pins that
     # conjunct: drop it and this value is accepted.
     run validate_tool_arguments "typed" '{"name": "abc", "count": 1.5e-7}'
-    assert_failure
-    assert_output --partial "count expected integer, got number (non-integer) (1.5E-7)"
+    assert_failure 1
+    assert_output "Invalid type(s): count expected integer, got number (non-integer) (1.5E-7)."
 }
 
 @test "validate_tool_arguments: a literal written with a zero fraction satisfies a declared integer type" {
@@ -876,9 +770,8 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
 
 @test "validate_tool_arguments: a fractional literal at 2^52 against a union offering integer is rejected naming both alternatives" {
     run validate_tool_arguments "union" '{"count": 4503599627370496.5}'
-    assert_failure
-    assert_output --partial "Invalid type(s):"
-    assert_output --partial "count expected integer or string, got number (non-integer) (4503599627370496.5)"
+    assert_failure 1
+    assert_output "Invalid type(s): count expected integer or string, got number (non-integer) (4503599627370496.5)."
 }
 
 @test "validate_tool_arguments: a fractional array element at 2^52 against an integer items type is rejected and names the index" {
@@ -896,9 +789,8 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
   ]
 }'
     run validate_tool_arguments "counts" '{"values": [1, 4503599627370496.5]}'
-    assert_failure
-    assert_output --partial "Invalid array item(s):"
-    assert_output --partial "values[1] expected integer, got number (non-integer) (4503599627370496.5)"
+    assert_failure 1
+    assert_output "Invalid array item(s): values[1] expected integer, got number (non-integer) (4503599627370496.5)."
 }
 
 @test "validate_tool_arguments: a fractional array element at 2^52 against a union items type is rejected naming both alternatives" {
@@ -906,19 +798,16 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
     # reach type_ok down a different route. This one crosses them, so a
     # regression confined to a union-typed `items` cannot hide behind either.
     run validate_tool_arguments "union" '{"values": [1, 4503599627370496.5]}'
-    assert_failure
-    assert_output --partial "Invalid array item(s):"
-    assert_output --partial "values[1] expected integer or string, got number (non-integer) (4503599627370496.5)"
+    assert_failure 1
+    assert_output "Invalid array item(s): values[1] expected integer or string, got number (non-integer) (4503599627370496.5)."
 }
 
 @test "validate_tool_arguments: precedence — a fractional literal at 2^52 is reported as a type defect, not a range defect" {
     # `limit` declares integer plus minimum 1 and maximum 50, and the value
-    # violates both. Pre-change the type check could not see the fraction, so
-    # the call was reported as out of range instead.
+    # violates both; only the literal test sees the type defect.
     run validate_tool_arguments "ranged" '{"limit": 4503599627370496.5}'
-    assert_failure
-    assert_output --partial "limit expected integer, got number (non-integer) (4503599627370496.5)"
-    refute_output --partial "Out-of-range"
+    assert_failure 1
+    assert_output "Invalid type(s): limit expected integer, got number (non-integer) (4503599627370496.5)."
 }
 
 @test "validate_tool_arguments: exponent notation does not by itself escape the fractional-literal check" {
@@ -927,8 +816,8 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
     # magnitude is below about 1e-6 — so writing the fraction with a trailing
     # `e0` does not reach the exponent fallback.
     run validate_tool_arguments "typed" '{"name": "abc", "count": 4503599627370496.5e0}'
-    assert_failure
-    assert_output --partial "count expected integer, got number (non-integer) (4503599627370496.5)"
+    assert_failure 1
+    assert_output "Invalid type(s): count expected integer, got number (non-integer) (4503599627370496.5)."
 }
 
 @test "validate_tool_arguments: KNOWN GAP — a fractional value below the smallest subnormal double is accepted as an integer" {
@@ -942,11 +831,6 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
 }
 
 # --- validate_tool_arguments: nested schemas and oneOf ---
-
-# Pre-change, the validator did not descend into an object-valued property,
-# ignored a schema-valued additionalProperties, a pattern inside items and
-# oneOf, so each rejection case below, except the precedence test, was
-# accepted.
 
 @test "validate_tool_arguments: an options value matching a oneOf branch passes" {
     run validate_tool_arguments "options" '{"options": {"limit": "5", "verbose": true, "tags": ["a"]}}'
@@ -1046,13 +930,20 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
 
 # --- validate_tool_arguments: keywords the validator does not enforce ---
 
-# A keyword the validator does not read would otherwise be waved through. Each
-# refusal below was accepted pre-change.
+# A keyword the validator does not read would otherwise be waved through, so a
+# schema using one is refused.
 
 @test "validate_tool_arguments: a schema using minLength is refused naming the keyword's path" {
     run validate_tool_arguments "short" '{"s": "abc"}'
     assert_failure 1
     assert_output "Cannot validate arguments for short: its inputSchema uses keyword(s) this validator does not enforce: properties.s.minLength."
+}
+
+@test "validate_tool_arguments: an unenforced keyword inside a schema-valued additionalProperties is refused naming its path" {
+    _write_one_tool '{"type": "object", "additionalProperties": {"minLength": 1}}'
+    run validate_tool_arguments "one" '{"x": "abc"}'
+    assert_failure 1
+    assert_output "Cannot validate arguments for one: its inputSchema uses keyword(s) this validator does not enforce: additionalProperties.minLength."
 }
 
 @test "validate_tool_arguments: an anyOf nested in a property's oneOf branch is refused naming its path" {
@@ -1093,9 +984,8 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
 
 # --- handle_tools_call: schema keywords with the wrong type ---
 
-# A wrong-typed keyword either enforced nothing — the tool ran — or made the
-# call answer "they could not be evaluated against its schema", which names no
-# keyword. Each refusal below took one of those two paths before the shape check.
+# A keyword of the wrong type cannot be enforced as declared, so the call is
+# refused naming each such keyword's path, and the tool does not run.
 
 # Replace the tools list with one tool `shape` declaring <schema-json>, call it
 # through handle_tools_call with <arguments-json> (default `{}`), and assert an
@@ -1350,6 +1240,10 @@ AP_SHAPE="a boolean or an object"
     _assert_one_of_keyword_refused additionalProperties 'null' "${AP_SHAPE}"
 }
 
+@test "handle_tools_call: a wrong-typed keyword inside a schema-valued additionalProperties is refused naming its path" {
+    _assert_shape_refused '{"type": "object", "additionalProperties": {"minimum": "1"}}' "additionalProperties.minimum must be a number"
+}
+
 @test "handle_tools_call: a false oneOf is refused naming its path" {
     _assert_property_keyword_refused oneOf 'false' "an array of objects"
 }
@@ -1507,13 +1401,6 @@ _write_one_tool() {
     assert_output ""
 }
 
-@test "validate_tool_arguments: additionalProperties false is enforced (guard: unchanged behavior)" {
-    _write_one_tool '{"type": "object", "properties": {"x": {}}, "additionalProperties": false}'
-    run validate_tool_arguments "one" '{"y": 1}'
-    assert_failure 1
-    assert_output "Unknown parameter(s): y. Allowed parameters: x."
-}
-
 @test "validate_tool_arguments: a oneOf of one empty branch accepts any value (guard: unchanged behavior)" {
     _write_one_tool '{"type": "object", "properties": {"x": {"oneOf": [{}]}}}'
     run validate_tool_arguments "one" '{"x": 1}'
@@ -1523,14 +1410,13 @@ _write_one_tool() {
 
 # --- validate_tool_arguments: arguments that are not a JSON object ---
 
-# The validator rejects a non-object before it checks any argument.
-# Each of these once passed validation, taking `required`,
-# `additionalProperties` and `enum` down with it.
+# The validator rejects a non-object before it checks any argument, because
+# `required`, `additionalProperties` and `properties` apply only to an object.
 _assert_rejects_non_object() {
     local arguments="$1" expected_type="$2"
     run validate_tool_arguments "strict" "${arguments}"
-    assert_failure
-    assert_output --partial "Invalid arguments: expected a JSON object, got ${expected_type}."
+    assert_failure 1
+    assert_output "Invalid arguments: expected a JSON object, got ${expected_type}."
 }
 
 @test "validate_tool_arguments: a string in place of an arguments object is rejected" {
@@ -1547,50 +1433,40 @@ _assert_rejects_non_object() {
 
 @test "validate_tool_arguments: an empty object is still checked against required parameters" {
     run validate_tool_arguments "strict" '{}'
-    assert_failure
-    assert_output --partial "Missing required parameter(s): number"
+    assert_failure 1
+    assert_output "Missing required parameter(s): number."
 }
 
 # --- validate_tool_arguments: a jq failure is a rejection, not a skip ---
 
 @test "validate_tool_arguments: arguments that are not JSON at all are rejected" {
     run validate_tool_arguments "strict" '{not valid json'
-    assert_failure
-    assert_output --partial "Cannot validate arguments for strict"
-    assert_output --partial "could not be evaluated against its schema"
-}
-
-@test "validate_tool_arguments: an unparseable tool list is rejected rather than skipping validation" {
-    printf '%s' '{"tools": [ broken' > "${MCP_TOOLS_LIST_FILE}"
-    run validate_tool_arguments "strict" '{"number": "5"}'
-    assert_failure
-    assert_output --partial "is missing or does not hold one JSON object."
+    assert_failure 1
+    assert_output "Cannot validate arguments for strict: they could not be evaluated against its schema."
 }
 
 @test "validate_tool_arguments: a missing tool list file is rejected rather than skipping validation" {
-    # Previously a missing tools list was read as "{}", so the function found no
-    # schema, skipped validation and reported success. A validator that could
-    # not read its schemas has not validated anything, so the missing file is a
-    # rejection now, on the same footing as a malformed one.
+    # A validator that could not read its schemas has not validated anything.
     rm -f -- "${MCP_TOOLS_LIST_FILE}"
     run validate_tool_arguments "strict" '{"number": "5"}'
-    assert_failure
-    assert_output --partial "Cannot validate arguments for strict"
-    assert_output --partial "is missing or does not hold one JSON object."
+    assert_failure 1
+    assert_output "Cannot validate arguments for strict: the tool list at ${MCP_TOOLS_LIST_FILE} is missing or does not hold one JSON object."
 }
 
-@test "validate_tool_arguments: a tools list that parses but is not a tools list is rejected" {
-    # `42` is one parseable document but not a JSON object, so the type gate in
-    # read_json_file rejects it first and the rejection is the first branch's
-    # message, not the jq-failure branch's. The jq-failure branch is still
-    # reachable through a file: an object whose `tools` holds a non-object
-    # element passes the gate and errors in `select`, since the trailing `?`
-    # guards only the iteration.
+@test "validate_tool_arguments: a tool list file holding unparseable JSON is rejected rather than skipping validation" {
+    # A list that cannot be parsed yields no schemas, so nothing was validated.
+    printf '%s' '{"tools": [ broken' > "${MCP_TOOLS_LIST_FILE}"
+    run validate_tool_arguments "strict" '{"number": "5"}'
+    assert_failure 1
+    assert_output "Cannot validate arguments for strict: the tool list at ${MCP_TOOLS_LIST_FILE} is missing or does not hold one JSON object."
+}
+
+@test "validate_tool_arguments: a tool list file whose only document is not an object is rejected rather than skipping validation" {
+    # `42` parses as JSON but is not the object the tools list must be.
     printf '%s' '42' > "${MCP_TOOLS_LIST_FILE}"
     run validate_tool_arguments "strict" '{"number": "5"}'
-    assert_failure
-    assert_output --partial "Cannot validate arguments for strict"
-    assert_output --partial "is missing or does not hold one JSON object."
+    assert_failure 1
+    assert_output "Cannot validate arguments for strict: the tool list at ${MCP_TOOLS_LIST_FILE} is missing or does not hold one JSON object."
 }
 
 @test "validate_tool_arguments: a tools list whose tools hold a non-object element is rejected" {
@@ -1599,9 +1475,8 @@ _assert_rejects_non_object() {
     # branch's own message.
     printf '%s' '{"tools": [1]}' > "${MCP_TOOLS_LIST_FILE}"
     run validate_tool_arguments "strict" '{"number": "5"}'
-    assert_failure
-    assert_output --partial "Cannot validate arguments for strict"
-    assert_output --partial "does not hold a usable tools list"
+    assert_failure 1
+    assert_output "Cannot validate arguments for strict: the tool list at ${MCP_TOOLS_LIST_FILE} does not hold a usable tools list."
 }
 
 # --- handle_tools_call: wiring (validation runs before dispatch) ---
@@ -1611,29 +1486,7 @@ _assert_rejects_non_object() {
     params=$(jq -n -c '{name: "strict", arguments: {repo: "a/b"}}')
     run handle_tools_call 1 "$params"
     assert_success
-    assert_output --partial '"isError":true'
-    assert_output --partial "Missing required parameter(s): number"
-    refute_output --partial "DISPATCHED"
-}
-
-@test "handle_tools_call: invalid enum returns an isError result, not a dispatch" {
-    local params
-    params=$(jq -n -c '{name: "strict", arguments: {number: "5", repo: "x/y"}}')
-    run handle_tools_call 1 "$params"
-    assert_success
-    assert_output --partial '"isError":true'
-    assert_output --partial 'Invalid value(s):'
-    refute_output --partial "DISPATCHED"
-}
-
-@test "handle_tools_call: an out-of-range argument returns an isError result, not a dispatch" {
-    local params
-    params=$(jq -n -c '{name: "ranged", arguments: {limit: 999}}')
-    run handle_tools_call 1 "$params"
-    assert_success
-    assert_output --partial '"isError":true'
-    assert_output --partial "limit=999 above maximum 50"
-    refute_output --partial "DISPATCHED"
+    mcp_assert_tool_result "${output}" 1 true "Missing required parameter(s): number."
 }
 
 @test "handle_tools_call: a schema using an unenforced keyword returns an isError result, not a dispatch" {
@@ -1642,10 +1495,9 @@ _assert_rejects_non_object() {
     params=$(jq -n -c '{name: "short", arguments: {s: "abc"}}')
     run handle_tools_call 1 "$params"
     assert_success
-    assert_equal "$(printf '%s' "$output" | jq -r '.result.isError')" "true"
-    assert_equal "$(printf '%s' "$output" | jq -r '.result.content[0].text')" \
+    mcp_assert_tool_result "${output}" 1 true \
         "Cannot validate arguments for short: its inputSchema uses keyword(s) this validator does not enforce: properties.s.minLength."
-    [[ ! -e "${BATS_TEST_TMPDIR}/tool_short_ran" ]]
+    assert [ ! -e "${BATS_TEST_TMPDIR}/tool_short_ran" ]
 }
 
 @test "handle_tools_call: valid arguments are dispatched to the tool" {
@@ -1653,27 +1505,22 @@ _assert_rejects_non_object() {
     params=$(jq -n -c '{name: "strict", arguments: {number: "5"}}')
     run handle_tools_call 1 "$params"
     assert_success
-    assert_output --partial "DISPATCHED"
-    assert_output --partial '"isError":false'
+    mcp_assert_tool_result "${output}" 1 false 'DISPATCHED:{"number":"5"}'
 }
 
-# handle_tools_call derives `arguments` out of the params before validating, and
-# that derivation is what decides which types reach the validator at all. Written
-# as `.arguments // {}` it substituted {} for a present `null` and a present
-# `false` — jq's `//` treats both as absent — so those two were silently coerced
-# into a valid empty object while every other non-object was rejected. One case
-# per JSON type, because the derivation discriminates by type and nothing else.
-# These are not remote-unreachable: process_request only requires the request to
-# be parseable JSON, and every value below is.
+# handle_tools_call derives `arguments` from the params before validating. jq's
+# `//` treats a present `null` and `false` as absent, so a derivation built on it
+# would coerce both into a valid empty object. One case per JSON type, because
+# the derivation discriminates by type and nothing else. process_request only
+# requires the request to be parseable JSON, so a client can send every value
+# below.
 _assert_call_rejects_non_object() {
     local arguments_json="$1" expected_type="$2"
     local params
     params=$(jq -n -c --argjson a "${arguments_json}" '{name: "strict", arguments: $a}')
     run handle_tools_call 1 "$params"
     assert_success
-    assert_output --partial '"isError":true'
-    assert_output --partial "expected a JSON object, got ${expected_type}."
-    refute_output --partial "DISPATCHED"
+    mcp_assert_tool_result "${output}" 1 true "Invalid arguments: expected a JSON object, got ${expected_type}."
 }
 
 @test "handle_tools_call: a null arguments value is rejected, not coerced to an empty object" {
@@ -1708,6 +1555,5 @@ _assert_call_rejects_non_object() {
     params=$(jq -n -c '{name: "loose"}')
     run handle_tools_call 1 "$params"
     assert_success
-    assert_output --partial "DISPATCHED:{}"
-    assert_output --partial '"isError":false'
+    mcp_assert_tool_result "${output}" 1 false "DISPATCHED:{}"
 }
