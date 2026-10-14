@@ -411,6 +411,9 @@ BODY
     }
 
     run _server_teardown
+    # bats' exit trap calls `kill` under BATS_TEST_TIMEOUT; a spy left defined
+    # there reads the unset `kill_log` and nounset ends the test unreported.
+    unset -f kill
 
     assert_success
     assert [ ! -e "${call_root}" ]
