@@ -44,7 +44,7 @@ _source_core_with() {
 }
 
 # The first absolute-path Bash on this machine that reports a version below the
-# 4.1 floor, or nothing when every candidate meets it. Each candidate is run and
+# 5.1 floor, or nothing when every candidate meets it. Each candidate is run and
 # its own BASH_VERSINFO read, never the predicate under test: a defect in that
 # predicate must not decide which interpreter the end-to-end case drives.
 _find_bash_below_floor() {
@@ -58,7 +58,7 @@ _find_bash_below_floor() {
         local minor="${reported##* }"
         case "${major}" in ''|*[!0-9]*) continue ;; esac
         case "${minor}" in ''|*[!0-9]*) continue ;; esac
-        if (( 10#${major} < 4 || (10#${major} == 4 && 10#${minor} < 1) )); then
+        if (( 10#${major} < 5 || (10#${major} == 5 && 10#${minor} < 1) )); then
             printf '%s\n' "${candidate}"
             return 0
         fi
@@ -79,34 +79,37 @@ _assert_predicate_returns_1() {
 
 # --- _mcp_bash_meets_floor ---
 
-@test "_mcp_bash_meets_floor: 4.1 and above meet the floor" {
-    assert _mcp_bash_meets_floor 4 1
-    assert _mcp_bash_meets_floor 4 9
-    assert _mcp_bash_meets_floor 5 0
+@test "_mcp_bash_meets_floor: 5.1 and above meet the floor" {
+    assert _mcp_bash_meets_floor 5 1
+    assert _mcp_bash_meets_floor 5 3
+    assert _mcp_bash_meets_floor 5 9
+    assert _mcp_bash_meets_floor 6 0
     # Numeric, not lexical: "10" sorts below "4" as a string.
     assert _mcp_bash_meets_floor 10 0
 }
 
-@test "_mcp_bash_meets_floor: below 4.1 does not meet the floor" {
+@test "_mcp_bash_meets_floor: below 5.1 does not meet the floor" {
     # 3.2 is stock macOS /bin/bash, the version this guard exists to refuse.
     _assert_predicate_returns_1 _mcp_bash_meets_floor 3 2
-    _assert_predicate_returns_1 _mcp_bash_meets_floor 4 0
+    _assert_predicate_returns_1 _mcp_bash_meets_floor 4 4
+    _assert_predicate_returns_1 _mcp_bash_meets_floor 4 9
+    _assert_predicate_returns_1 _mcp_bash_meets_floor 5 0
 }
 
 @test "_mcp_bash_meets_floor: an empty or non-numeric component is below the floor" {
     _assert_predicate_returns_1 _mcp_bash_meets_floor "" ""
-    _assert_predicate_returns_1 _mcp_bash_meets_floor 4 ""
+    _assert_predicate_returns_1 _mcp_bash_meets_floor 5 ""
     _assert_predicate_returns_1 _mcp_bash_meets_floor "x" "y"
-    _assert_predicate_returns_1 _mcp_bash_meets_floor 4 "1a"
+    _assert_predicate_returns_1 _mcp_bash_meets_floor 5 "1a"
 }
 
 @test "_mcp_bash_meets_floor: a leading zero compares in base 10, not octal" {
     # The digit guards admit "08", and a leading zero in an arithmetic context
     # means octal, where 08 is not a number: without the 10# prefix bash writes
     # its own complaint to stderr and the predicate answers below the floor.
-    assert _mcp_bash_meets_floor 4 08
+    assert _mcp_bash_meets_floor 5 08
     assert _mcp_bash_meets_floor 08 0
-    _assert_predicate_returns_1 _mcp_bash_meets_floor 04 00
+    _assert_predicate_returns_1 _mcp_bash_meets_floor 05 00
 }
 
 # --- _mcp_jq_meets_floor ---
@@ -268,7 +271,7 @@ _assert_predicate_returns_1() {
 
     local out
     out="$(PATH="$(stub_bin_dir)" _mcp_install_hint bash)"
-    [[ "${out}" == *"install bash 4.1 or newer with your platform's package manager"* ]] \
+    [[ "${out}" == *"install bash 5.1 or newer with your platform's package manager"* ]] \
         || fail "hint lacks the generic install line; hint was: ${out}"
     [[ "${out}" == *"before /usr/bin in the PATH"* ]] \
         || fail "hint lacks the PATH ordering clause; hint was: ${out}"
@@ -323,7 +326,7 @@ _assert_predicate_returns_1() {
     local old_bash
     old_bash="$(_find_bash_below_floor)" || old_bash=""
     if [[ -z "${old_bash}" ]]; then
-        skip "no Bash below 4.1 on this machine; this arm is covered end to end only where one is present"
+        skip "no Bash below 5.1 on this machine; this arm is covered end to end only where one is present"
     fi
 
     local old_version
@@ -334,7 +337,7 @@ _assert_predicate_returns_1() {
     assert_failure
     assert_output ''
     assert_stderr --partial "bash-mcp-sdk"
-    assert_stderr --partial "4.1"
+    assert_stderr --partial "5.1"
     assert_stderr --partial "${old_version}"
 }
 

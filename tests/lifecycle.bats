@@ -219,6 +219,26 @@ BODY
     assert_success
 }
 
+@test "SIGHUP to an idle server's pid alone ends it by the signal without another stdin line" {
+    # The server is blocked in its read loop with its stdin held open and no
+    # call in flight. The trap runs the teardown and re-raises the signal; the
+    # server has to die by it at once, not stay in `read` until the client sends
+    # a line. No caller EXIT handler is installed, so the only EXIT trap is the
+    # SDK's own.
+    write_fixture_files '{"tools": []}'
+    local server="${BATS_TEST_TMPDIR}/idle_server.sh"
+    write_server "${server}" < /dev/null
+    mcp_start_server "${server}"
+
+    kill -HUP "${MCP_SERVER_PID}"
+
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
+    assert_success
+    local status=0
+    wait "${MCP_SERVER_PID}" || status=$?
+    assert_equal "${status}" 129
+}
+
 @test "a completed call leaves no sentinel or tool process behind" {
     export SLOW_SECS=2
     mcp_start_server_isolated "${CANCELLATION_SERVER}"

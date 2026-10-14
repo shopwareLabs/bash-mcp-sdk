@@ -40,16 +40,6 @@ jobs:
       matrix:
         distro: [debian, alpine]
         include:
-          - distro: bash-4.1
-            base_image: bash:4.1
-          - distro: bash-4.2
-            base_image: bash:4.2
-          - distro: bash-4.3
-            base_image: bash:4.3
-          - distro: bash-4.4
-            base_image: bash:4.4
-          - distro: bash-5.0
-            base_image: bash:5.0
           - distro: bash-5.1
             base_image: bash:5.1
           - distro: bash-5.3
