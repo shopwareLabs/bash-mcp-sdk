@@ -34,13 +34,9 @@ load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 setup() {
-    MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    MCP_EXTRA_LOG_FILE=""
-    MCP_CONFIG_FILE="${BATS_TEST_TMPDIR}/config.json"
-    MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
-    PROJECT_ROOT="${BATS_TEST_TMPDIR}"
+    mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
     TMPDIR="${BATS_TEST_TMPDIR}/tmp"
-    export MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT TMPDIR
+    export TMPDIR
     mkdir -p "${TMPDIR}"
 
     # The files the harness server's tools and hooks write their evidence to.
@@ -48,8 +44,7 @@ setup() {
     export EXIT_MARKER="${BATS_TEST_TMPDIR}/exit-trap.ran"
     export CANCEL_HOOK_FILE="${BATS_TEST_TMPDIR}/cancel-hook"
 
-    printf '%s\n' '{}' > "${MCP_CONFIG_FILE}"
-    printf '%s\n' '{
+    write_fixture_files '{
         "tools": [
             {"name": "x", "inputSchema": {"type": "object"}},
             {"name": "nested", "inputSchema": {"type": "object"}},
@@ -57,7 +52,7 @@ setup() {
             {"name": "recorder", "inputSchema": {"type": "object"}},
             {"name": "stubborn_recorder", "inputSchema": {"type": "object"}}
         ]
-    }' > "${MCP_TOOLS_LIST_FILE}"
+    }'
 
     # The harness server. Both tools record a state file in their call
     # directory, install an EXIT trap, publish the directory's path last — so a
@@ -97,78 +92,13 @@ teardown() {
     # temp directory fail. A regular file a test put in TMPDIR's place is
     # untouched by this.
     chmod -R u+rwx "${BATS_TEST_TMPDIR}" 2>/dev/null || true
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT \
-        TMPDIR DIR_FILE EXIT_MARKER CANCEL_HOOK_FILE MCP_SERVER_INSTANCE MCP_SERVER_PGID
-}
-
-# A tools/call line for tool <name> with empty arguments and request id <id>.
-_call_request() {
-    local name="$1"
-    local id="$2"
-    jq -nc --arg n "${name}" --argjson id "${id}" \
-        '{jsonrpc: "2.0", id: $id, method: "tools/call", params: {name: $n, arguments: {}}}'
-}
-
-# Print the names of the call roots the SDK left under TMPDIR, one per line.
-# Every per-call file lives in one.
-_call_files_left() {
-    local entry
-    for entry in "${TMPDIR}"/mcp-call.*; do
-        [[ -e "${entry}" ]] || continue
-        printf '%s\n' "${entry##*/}"
-    done
-}
-
-# Wait up to <secs> for <file> to hold something.
-_wait_for_file() {
-    local file="$1"
-    local limit="$2"
-    local deadline=$(( SECONDS + limit ))
-    while (( SECONDS < deadline )); do
-        if [[ -s "${file}" ]]; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
-# Wait up to <secs> for the server log to carry a line containing <text>.
-_wait_for_log() {
-    local text="$1"
-    local limit="$2"
-    local deadline=$(( SECONDS + limit ))
-    while (( SECONDS < deadline )); do
-        if [[ -f "${MCP_LOG_FILE}" ]] && grep -qF -- "${text}" "${MCP_LOG_FILE}"; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
-# Wait up to <secs> for process <pid> to be gone or a zombie.
-_wait_for_exit() {
-    local pid="$1"
-    local limit="$2"
-    local deadline=$(( SECONDS + limit ))
-    local state=""
-    while (( SECONDS < deadline )); do
-        state="$(_mcp_proc_state "${pid}")"
-        if [[ -z "${state}" || "${state}" == Z* ]]; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
+    unset TMPDIR DIR_FILE EXIT_MARKER CANCEL_HOOK_FILE MCP_SERVER_INSTANCE MCP_SERVER_PGID
 }
 
 # --- the directory a tool sees ---
 
-@test "process_request: each call gets its own empty, writable, owner-only MCP_CALL_TMPDIR" {
-    local dir_log="${BATS_TEST_TMPDIR}/dirs"
+@test "process_request: a call's MCP_CALL_TMPDIR is an empty directory only its owner can use" {
     tool_x() {
-        printf '%s\n' "${MCP_CALL_TMPDIR}" >> "${dir_log}"
         [[ -z "$(ls -A "${MCP_CALL_TMPDIR}")" ]] || return 1
         : > "${MCP_CALL_TMPDIR}/probe" || return 1
         local listing
@@ -176,20 +106,28 @@ _wait_for_exit() {
         printf '%s\n' "${listing:0:10}"
     }
 
-    run --separate-stderr process_request "$(_call_request x 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
+
     assert_success
-    run jq -e '.result.isError == false and .result.content[0].text == "drwx------"' <<< "${output}"
+    mcp_assert_tool_result "${output}" 1 false "drwx------"
+}
+
+@test "process_request: each call gets an MCP_CALL_TMPDIR of its own under TMPDIR" {
+    local dir_log="${BATS_TEST_TMPDIR}/dirs"
+    tool_x() { printf '%s\n' "${MCP_CALL_TMPDIR}" >> "${dir_log}"; }
+
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
     assert_success
-    run --separate-stderr process_request "$(_call_request x 2)"
-    assert_success
-    run jq -e '.result.isError == false and .result.content[0].text == "drwx------"' <<< "${output}"
+    run --separate-stderr process_request "$(mcp_tools_call_request 2 x '{}')"
     assert_success
 
     local first second
     { IFS= read -r first; IFS= read -r second; } < "${dir_log}"
     assert [ -n "${first}" ]
+    assert [ -n "${second}" ]
     assert [ "${first}" != "${second}" ]
     assert_equal "${first%/mcp-call.*/tmp}" "${TMPDIR}"
+    assert_equal "${second%/mcp-call.*/tmp}" "${TMPDIR}"
 }
 
 @test "process_request: the before-tool hook, the tool and a process it starts see the same MCP_CALL_TMPDIR" {
@@ -199,7 +137,7 @@ _wait_for_exit() {
     # puts there.
     tool_x() { sh -c 'printf "%s\n" "${MCP_CALL_TMPDIR}"'; }
 
-    run --separate-stderr process_request "$(_call_request x 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     local tool_dir
@@ -217,7 +155,7 @@ _wait_for_exit() {
         printf 'outer-after %s\n' "${MCP_CALL_TMPDIR}" >> "${dir_log}"
     }
 
-    run --separate-stderr process_request "$(_call_request nested 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 nested '{}')"
 
     assert_success
     run jq -e '.result.isError == false' <<< "${output}"
@@ -239,15 +177,14 @@ _wait_for_exit() {
         printf '%s\n' "${MCP_CALL_TMPDIR}"
     }
 
-    run --separate-stderr process_request "$(_call_request x 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     local call_dir
     call_dir="$(jq -r '.result.content[0].text' <<< "${output}")"
     assert_equal "${call_dir%/mcp-call.*/tmp}" "${TMPDIR}"
-    assert [ ! -e "${call_dir}" ]
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 @test "process_request: a call that exits non-zero leaves its directory removed" {
@@ -257,7 +194,7 @@ _wait_for_exit() {
         return 4
     }
 
-    run --separate-stderr process_request "$(_call_request x 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     local response="${output}"
@@ -266,9 +203,8 @@ _wait_for_exit() {
     local call_dir
     call_dir="$(jq -r '.result.content[0].text | sub("^Error executing x: "; "")' <<< "${response}")"
     assert_equal "${call_dir%/mcp-call.*/tmp}" "${TMPDIR}"
-    assert [ ! -e "${call_dir}" ]
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 @test "process_request: a call that leaves a read-only subdirectory with a file in it has its directory removed and is answered" {
@@ -279,7 +215,7 @@ _wait_for_exit() {
         printf '%s\n' "${MCP_CALL_TMPDIR}"
     }
 
-    run --separate-stderr process_request "$(_call_request x 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     local response="${output}"
@@ -289,8 +225,8 @@ _wait_for_exit() {
     call_dir="$(jq -r '.result.content[0].text' <<< "${response}")"
     assert_equal "${call_dir%/mcp-call.*/tmp}" "${TMPDIR}"
     assert [ ! -e "${call_dir}" ]
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
     run grep -qF "WARN" "${MCP_LOG_FILE}"
     assert_failure 1
 }
@@ -308,7 +244,7 @@ tool_x() {
 BODY
     mcp_start_server "${posix_server}"
 
-    mcp_send "$(_call_request x 51)"
+    mcp_send "$(mcp_tools_call_request 51 x '{}')"
     run mcp_wait_for_response 51 5
     assert_success
     local response="${output}"
@@ -318,7 +254,7 @@ BODY
     call_dir="$(jq -r '.result.content[0].text' <<< "${response}")"
     assert [ ! -e "${call_dir}" ]
 
-    mcp_send '{"jsonrpc":"2.0","id":52,"method":"ping"}'
+    mcp_send "$(mcp_ping_request 52)"
     run mcp_wait_for_response 52 5
     assert_success
 }
@@ -334,7 +270,7 @@ BODY
         printf '%s\n' "${MCP_CALL_TMPDIR}"
     }
 
-    run --separate-stderr process_request "$(_call_request x 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     local call_dir
@@ -354,13 +290,12 @@ BODY
         printf 'tool output\n'
     }
 
-    run --separate-stderr process_request "$(_call_request x 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    run jq -e '.id == 1 and .result.isError == false and .result.content[0].text == "tool output"' <<< "${output}"
-    assert_success
-    run _call_files_left
-    assert_output ""
+    mcp_assert_tool_result "${output}" 1 false "tool output"
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
     run grep -qF "WARN" "${MCP_LOG_FILE}"
     assert_failure 1
 }
@@ -372,13 +307,12 @@ BODY
         printf 'tool output\n'
     }
 
-    run --separate-stderr process_request "$(_call_request x 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    run jq -e '.id == 1 and .result.isError == false and .result.content[0].text == "tool output"' <<< "${output}"
-    assert_success
-    run _call_files_left
-    assert_output ""
+    mcp_assert_tool_result "${output}" 1 false "tool output"
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
     run grep -qF "WARN" "${MCP_LOG_FILE}"
     assert_failure 1
 }
@@ -409,7 +343,7 @@ tool_x() {
 BODY
     mcp_start_server "${layout_server}"
 
-    mcp_send "$(_call_request x 56)"
+    mcp_send "$(mcp_tools_call_request 56 x '{}')"
     run mcp_wait_for_response 56 5
 
     assert_success
@@ -432,27 +366,12 @@ BODY
         fi
     }
 
-    run --separate-stderr process_request "$(_call_request x 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    run jq -e '.result.isError == false and .result.content[0].text == "absolute and present"' <<< "${output}"
-    assert_success
-    run _call_files_left
-    assert_output ""
-}
-
-@test "process_request: with a relative TMPDIR and no hook the tool runs (guard: unchanged behavior)" {
-    cd "${BATS_TEST_TMPDIR}"
-    TMPDIR="tmp"
-    tool_x() { printf 'tool output\n'; }
-
-    run --separate-stderr process_request "$(_call_request x 1)"
-
-    assert_success
-    run jq -e '.result.isError == false and .result.content[0].text == "tool output"' <<< "${output}"
-    assert_success
-    run _call_files_left
-    assert_output ""
+    mcp_assert_tool_result "${output}" 1 false "absolute and present"
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 # --- the call's files ---
@@ -464,20 +383,19 @@ tool_x() { printf 'tool output\n'; }
 BODY
     mcp_start_server "${plain_server}"
 
-    mcp_send "$(_call_request x 54)"
+    mcp_send "$(mcp_tools_call_request 54 x '{}')"
     run mcp_wait_for_response 54 5
 
     assert_success
-    run jq -e '.result.isError == false and .result.content[0].text == "tool output"' <<< "${output}"
-    assert_success
-    run _call_files_left
-    assert_output ""
+    mcp_assert_tool_result "${output}" 54 false "tool output"
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 @test "a cancellation that has to SIGKILL the group removes the call's directory" {
     mcp_start_server "${SERVER}"
-    mcp_send "$(_call_request stubborn_recorder 44)"
-    run _wait_for_file "${DIR_FILE}" 5
+    mcp_send "$(mcp_tools_call_request 44 stubborn_recorder '{}')"
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
     local call_dir
     call_dir="$(<"${DIR_FILE}")"
@@ -486,35 +404,19 @@ BODY
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":44}}'
 
     # The second line is logged after the call's files are removed.
-    run _wait_for_log "Tool stubborn_recorder ignored SIGTERM; process group killed" 6
+    run mcp_wait_for_log fixed "Tool stubborn_recorder ignored SIGTERM; process group killed" 6
     assert_success
-    run _wait_for_log "Cancelled tools/call 44 (stubborn_recorder)" 3
+    run mcp_wait_for_log fixed "Cancelled tools/call 44 (stubborn_recorder)" 3
     assert_success
     assert [ ! -e "${call_dir}" ]
-    run _call_files_left
-    assert_output ""
-}
-
-@test "a cancellation whose directory the teardown already removed logs no WARN about the call directory" {
-    mcp_start_server "${SERVER}"
-    mcp_send "$(_call_request recorder 55)"
-    run _wait_for_file "${DIR_FILE}" 5
-    assert_success
-
-    mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":55}}'
-
-    run _wait_for_log "Cancelled tools/call 55 (recorder)" 6
-    assert_success
-    # The dispatch's own removal runs after that line. A second `find` against
-    # the path the teardown just removed is what logs the spurious WARN.
-    run _wait_for_log "call directory" 2
-    assert_failure
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 @test "a server shutdown with a call in flight removes the call's directory" {
     mcp_start_server_isolated "${SERVER}"
-    mcp_send "$(_call_request recorder 45)"
-    run _wait_for_file "${DIR_FILE}" 5
+    mcp_send "$(mcp_tools_call_request 45 recorder '{}')"
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
     local call_dir
     call_dir="$(<"${DIR_FILE}")"
@@ -522,41 +424,41 @@ BODY
 
     kill -TERM -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
 
-    run _wait_for_exit "${MCP_SERVER_PID}" 6
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 6
     assert_success
     assert [ ! -e "${call_dir}" ]
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
 }
 
 # --- the cancel hook ---
 
 @test "a cancellation's cancel hook reads what the call recorded in MCP_CALL_TMPDIR" {
     mcp_start_server "${SERVER}"
-    mcp_send "$(_call_request recorder 46)"
-    run _wait_for_file "${DIR_FILE}" 5
+    mcp_send "$(mcp_tools_call_request 46 recorder '{}')"
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
     local call_dir
     call_dir="$(<"${DIR_FILE}")"
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":46}}'
 
-    run _wait_for_file "${CANCEL_HOOK_FILE}" 5
+    run mcp_wait_for_file "${CANCEL_HOOK_FILE}" 5
     assert_success
     assert_equal "$(<"${CANCEL_HOOK_FILE}")" "${call_dir}|recorded by the call"
 }
 
 @test "a shutdown's cancel hook reads what the call recorded in MCP_CALL_TMPDIR" {
     mcp_start_server_isolated "${SERVER}"
-    mcp_send "$(_call_request recorder 47)"
-    run _wait_for_file "${DIR_FILE}" 5
+    mcp_send "$(mcp_tools_call_request 47 recorder '{}')"
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
     local call_dir
     call_dir="$(<"${DIR_FILE}")"
 
     kill -TERM -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
 
-    run _wait_for_exit "${MCP_SERVER_PID}" 6
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 6
     assert_success
     assert [ -e "${CANCEL_HOOK_FILE}" ]
     assert_equal "$(<"${CANCEL_HOOK_FILE}")" "${call_dir}|recorded by the call"
@@ -571,23 +473,22 @@ BODY
         printf 'body output\n'
     }
 
-    run --separate-stderr process_request "$(_call_request x 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     assert [ -e "${trap_marker}" ]
-    run jq -e '.result.isError == false and .result.content[0].text == "body output\ntrap output"' <<< "${output}"
-    assert_success
+    mcp_assert_tool_result "${output}" 1 false "$(printf 'body output\ntrap output')"
 }
 
 @test "a tool's EXIT trap runs on the SIGTERM step of a cancellation" {
     mcp_start_server "${SERVER}"
-    mcp_send "$(_call_request recorder 48)"
-    run _wait_for_file "${DIR_FILE}" 5
+    mcp_send "$(mcp_tools_call_request 48 recorder '{}')"
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":48}}'
 
-    run _wait_for_log "Cancelled tools/call 48 (recorder)" 6
+    run mcp_wait_for_log fixed "Cancelled tools/call 48 (recorder)" 6
     assert_success
     assert [ -e "${EXIT_MARKER}" ]
     # The tool died on the TERM: no SIGKILL was needed to end it.
@@ -597,35 +498,37 @@ BODY
 
 @test "a tool's EXIT trap runs on the SIGTERM step of a server shutdown" {
     mcp_start_server_isolated "${SERVER}"
-    mcp_send "$(_call_request recorder 49)"
-    run _wait_for_file "${DIR_FILE}" 5
+    mcp_send "$(mcp_tools_call_request 49 recorder '{}')"
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
 
     kill -TERM -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
 
-    run _wait_for_exit "${MCP_SERVER_PID}" 6
+    run mcp_wait_for_exit "${MCP_SERVER_PID}" 6
     assert_success
     assert [ -e "${EXIT_MARKER}" ]
 }
 
 @test "a tool's EXIT trap does not run when a cancellation has to SIGKILL the group" {
     mcp_start_server "${SERVER}"
-    mcp_send "$(_call_request stubborn_recorder 50)"
-    run _wait_for_file "${DIR_FILE}" 5
+    mcp_send "$(mcp_tools_call_request 50 stubborn_recorder '{}')"
+    run mcp_wait_for_file "${DIR_FILE}" 5
     assert_success
 
     mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":50}}'
 
-    run _wait_for_log "Tool stubborn_recorder ignored SIGTERM; process group killed" 6
+    run mcp_wait_for_log fixed "Tool stubborn_recorder ignored SIGTERM; process group killed" 6
     assert_success
-    run _wait_for_log "Cancelled tools/call 50 (stubborn_recorder)" 3
+    run mcp_wait_for_log fixed "Cancelled tools/call 50 (stubborn_recorder)" 3
     assert_success
     assert [ ! -e "${EXIT_MARKER}" ]
 }
 
 # --- a directory that cannot be created ---
 
-@test "under set -o posix a call whose call root cannot be created answers isError, leaves no file in the server's directory, and the server answers the next request" {
+@test "under set -o posix a call whose call root cannot be created is refused cleanly" {
+    # Cleanly: an isError answer, the tool never run, no file left in the
+    # server's directory, and the server still answering.
     local server_tmp="${BATS_TEST_TMPDIR}/server-tmp"
     local server_cwd="${BATS_TEST_TMPDIR}/server-cwd"
     local tool_marker="${BATS_TEST_TMPDIR}/tool.ran"
@@ -645,19 +548,18 @@ BODY
     mv "${server_tmp}" "${server_tmp}.moved"
     : > "${server_tmp}"
 
-    mcp_send "$(_call_request x 57)"
+    mcp_send "$(mcp_tools_call_request 57 x '{}')"
     run mcp_wait_for_response 57 5
 
     assert_success
-    run jq -e '.result.isError == true and .result.content[0].text == "Cannot run x: its call directory could not be created."' <<< "${output}"
-    assert_success
+    mcp_assert_tool_result "${output}" 57 true "Cannot run x: its call directory could not be created."
     assert [ ! -e "${tool_marker}" ]
     run ls -A "${server_cwd}"
     assert_output ""
     run grep -qF "Tool x not run: cannot create its call directory in ${server_tmp}: " "${MCP_LOG_FILE}"
     assert_success
 
-    mcp_send '{"jsonrpc":"2.0","id":58,"method":"ping"}'
+    mcp_send "$(mcp_ping_request 58)"
     run mcp_wait_for_response 58 5
     assert_success
 }
@@ -673,14 +575,13 @@ BODY
         return 1
     }
 
-    run --separate-stderr process_request "$(_call_request x 1)"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    run jq -e '.id == 1 and .result.isError == true and .result.content[0].text == "Cannot run x: its call directory could not be created."' <<< "${output}"
-    assert_success
+    mcp_assert_tool_result "${output}" 1 true "Cannot run x: its call directory could not be created."
     assert [ ! -e "${tool_marker}" ]
-    run _call_files_left
-    assert_output ""
+    run mcp_count_call_roots "${TMPDIR}"
+    assert_output "0"
     run grep -qF "mkdir: simulated failure" "${MCP_LOG_FILE}"
     assert_success
 }

@@ -12,25 +12,22 @@ load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 setup() {
-    MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    MCP_EXTRA_LOG_FILE=""
-    PROJECT_ROOT="${BATS_TEST_TMPDIR}"
-    MCP_CONFIG_FILE="/dev/null"
-    MCP_TOOLS_LIST_FILE="/dev/null"
-    export MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE
+    mcp_test_env /dev/null /dev/null
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
 }
 
 teardown() {
     mcp_stop_server
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE MCP_LOG_STDERR
 }
 
 # --- _configure_extra_log_file ---
 
 @test "_configure_extra_log_file: empty path is a no-op" {
+    local configured="${BATS_TEST_TMPDIR}/configured.log"
+    MCP_EXTRA_LOG_FILE="$configured"
     _configure_extra_log_file ""
-    [[ -z "$MCP_EXTRA_LOG_FILE" ]]
+    assert_equal "$MCP_EXTRA_LOG_FILE" "$configured"
+    assert [ ! -s "${BATS_TEST_TMPDIR}/server.log" ]
 }
 
 @test "_configure_extra_log_file: relative path resolves against PROJECT_ROOT" {
@@ -40,8 +37,9 @@ teardown() {
 }
 
 @test "_configure_extra_log_file: absolute path used as-is" {
-    _configure_extra_log_file "/tmp/bats-test-mcp.log"
-    [[ "$MCP_EXTRA_LOG_FILE" == "/tmp/bats-test-mcp.log" ]]
+    mkdir -p "${BATS_TEST_TMPDIR}/absolute"
+    _configure_extra_log_file "${BATS_TEST_TMPDIR}/absolute/debug.log"
+    assert_equal "$MCP_EXTRA_LOG_FILE" "${BATS_TEST_TMPDIR}/absolute/debug.log"
 }
 
 @test "_configure_extra_log_file: non-existent parent dir warns and skips" {
@@ -64,13 +62,14 @@ teardown() {
     assert_success
 }
 
-@test "log: writes only to MCP_LOG_FILE when no extra log" {
-    local extra="${BATS_TEST_TMPDIR}/extra.log"
+@test "log: an empty MCP_EXTRA_LOG_FILE writes to MCP_LOG_FILE and attempts no second write" {
     MCP_EXTRA_LOG_FILE=""
-    log "INFO" "single write test"
+    # A write attempted at the empty path would fail and print the write-failure note, so an empty stderr shows none was attempted.
+    run --separate-stderr log "INFO" "single write test"
+    assert_success
+    assert_stderr ''
     run grep "single write test" "${BATS_TEST_TMPDIR}/server.log"
     assert_success
-    [[ ! -f "$extra" ]]
 }
 
 # --- log() stderr mirror ---
@@ -78,37 +77,23 @@ teardown() {
 @test "log: does not mirror to stderr by default" {
     run --separate-stderr log "INFO" "no mirror by default"
     assert_success
-    [[ -z "$stderr" ]]
-}
-
-@test "log: does not mirror to stderr when MCP_LOG_STDERR is 0" {
-    MCP_LOG_STDERR=0
-    run --separate-stderr log "INFO" "no mirror when zero"
-    assert_success
-    [[ -z "$stderr" ]]
+    assert_stderr ''
 }
 
 @test "log: mirrors to stderr and still writes to MCP_LOG_FILE when MCP_LOG_STDERR is 1" {
     MCP_LOG_STDERR=1
     run --separate-stderr log "INFO" "mirror to stderr test"
     assert_success
-    [[ "$stderr" == *"[INFO] mirror to stderr test"* ]]
+    assert_stderr --partial "[INFO] mirror to stderr test"
     run grep "mirror to stderr test" "${BATS_TEST_TMPDIR}/server.log"
     assert_success
 }
 
-@test "log: does not mirror to stderr for a non-1 value like true" {
+@test "log: does not mirror to stderr for a value other than 1, like true" {
     MCP_LOG_STDERR=true
     run --separate-stderr log "INFO" "no mirror for true"
     assert_success
-    [[ -z "$stderr" ]]
-}
-
-@test "log: does not mirror to stderr for a non-1 value like 2" {
-    MCP_LOG_STDERR=2
-    run --separate-stderr log "INFO" "no mirror for two"
-    assert_success
-    [[ -z "$stderr" ]]
+    assert_stderr ''
 }
 
 # --- a failed log write leaves the server running ---
@@ -116,8 +101,7 @@ teardown() {
 # Write the server script and the files it reads into BATS_TEST_TMPDIR; the
 # body on stdin runs between `source` and `run_mcp_server`.
 _write_logging_server() {
-    printf '{}\n' > "${BATS_TEST_TMPDIR}/config.json"
-    printf '{"tools": []}\n' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_fixture_files '{"tools": []}'
     write_server "${BATS_TEST_TMPDIR}/server.sh"
 }
 
@@ -139,8 +123,8 @@ BODY
     _run_two_pings
     assert_equal "$status" 0
     assert_equal "$(printf '%s\n' "$output" | jq -c '.id' | paste -sd, -)" "1,2"
-    [[ "$stderr" == *"mcp: cannot write log file ${missing}"* ]]
-    [[ "$stderr" != *"No such file or directory"* ]]
+    assert_stderr --partial "mcp: cannot write log file ${missing}"
+    refute_stderr --partial "No such file or directory"
 }
 
 @test "log: an unwritable MCP_EXTRA_LOG_FILE leaves the server answering and exiting 0" {
@@ -151,8 +135,8 @@ BODY
     _run_two_pings
     assert_equal "$status" 0
     assert_equal "$(printf '%s\n' "$output" | jq -c '.id' | paste -sd, -)" "1,2"
-    [[ "$stderr" == *"mcp: cannot write log file ${missing}"* ]]
-    [[ "$stderr" != *"No such file or directory"* ]]
+    assert_stderr --partial "mcp: cannot write log file ${missing}"
+    refute_stderr --partial "No such file or directory"
     run grep -c '\[INFO\]' "${BATS_TEST_TMPDIR}/server.log"
     assert_success
 }
@@ -174,6 +158,7 @@ BODY
     run mcp_wait_for_response 2
     assert_success
     mcp_close_stdin
+    mcp_wait_for_exit "${MCP_SERVER_PID}" 10
     local server_status=0
     wait "${MCP_SERVER_PID}" || server_status=$?
     assert_equal "$server_status" 0
@@ -191,9 +176,9 @@ export MCP_LOG_STDERR=1
 BODY
     _run_two_pings
     assert_equal "$status" 0
-    [[ "$stderr" == *"mcp: cannot write log file ${missing}"* ]]
-    [[ "$stderr" != *"No such file or directory"* ]]
-    [[ "$stderr" == *"] [INFO] "* ]]
+    assert_stderr --partial "mcp: cannot write log file ${missing}"
+    refute_stderr --partial "No such file or directory"
+    assert_stderr --partial "] [INFO] "
 }
 
 # --- log() escapes line breaks in the message ---

@@ -17,34 +17,10 @@ load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
 CORE_SH="${REPO_ROOT}/lib/mcpserver_core.sh"
 
 setup() {
-    MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    MCP_EXTRA_LOG_FILE=""
-    PROJECT_ROOT="${BATS_TEST_TMPDIR}"
-    MCP_CONFIG_FILE="/dev/null"
-    MCP_TOOLS_LIST_FILE="/dev/null"
-    export MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE
+    mcp_test_env /dev/null /dev/null
     # The guards pass on any machine that can run this suite, so sourcing here
     # is what makes the two predicates callable directly.
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
-}
-
-teardown() {
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE PROJECT_ROOT MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE
-}
-
-# Write an executable stand-in for a command into "$dir", with "$body" as its
-# whole script. Shims are built per test under BATS_TEST_TMPDIR; nothing here is
-# committed.
-_make_shim() {
-    local dir="$1"
-    local name="$2"
-    local body="$3"
-    mkdir -p "${dir}"
-    {
-        printf '#!/bin/sh\n'
-        printf '%s\n' "${body}"
-    } > "${dir}/${name}"
-    chmod +x "${dir}/${name}"
 }
 
 # Source the SDK in a fresh shell whose PATH is exactly "$1", with stdout and
@@ -53,7 +29,8 @@ _make_shim() {
 # floor; "env" is resolved through this test's own PATH before the swap.
 _source_core_with_path() {
     local path_value="$1"
-    run --separate-stderr env "PATH=${path_value}" "${BASH}" -c "source '${CORE_SH}'"
+    # shellcheck disable=SC2016 # the child bash expands "$1", so it stays literal here.
+    run --separate-stderr env "PATH=${path_value}" "${BASH}" -c 'source "$1"' _ "${CORE_SH}"
 }
 
 # Source the SDK under an arbitrary interpreter "$1", with stdout and stderr
@@ -62,7 +39,8 @@ _source_core_with_path() {
 # suite, and only the old-Bash case below needs a different interpreter.
 _source_core_with() {
     local interpreter="$1"
-    run --separate-stderr "${interpreter}" -c "source '${CORE_SH}'"
+    # shellcheck disable=SC2016 # the child shell expands "$1", so it stays literal here.
+    run --separate-stderr "${interpreter}" -c 'source "$1"' _ "${CORE_SH}"
 }
 
 # The first absolute-path Bash on this machine that reports a version below the
@@ -88,22 +66,11 @@ _find_bash_below_floor() {
     return 1
 }
 
-# bats-assert 2.2.4 ships no stderr assertion, and `run --separate-stderr` is
-# the only way to assert stdout emptiness on its own, so stderr substrings are
-# checked here.
-_assert_stderr_contains() {
-    local needle="$1"
-    [[ "${stderr}" == *"${needle}"* ]] \
-        || fail "stderr does not contain '${needle}'; stderr was: ${stderr}"
-}
-
 # Assert a predicate returns exactly 1 — not merely any non-zero status.
 # `refute <cmd>` treats every non-zero status as falsy, so a bare refute passes
-# vacuously when the command does not exist and the shell answers 127: the
-# refute-only predicate cases stayed green with the whole guard deleted. Driving
-# the call through `run` and checking the exact status makes a missing function
-# (127) fail the case, so the assertion pins the predicate rather than its
-# absence.
+# when the command does not exist and the shell answers 127. Checking the exact
+# status makes a missing function fail the case, so the assertion pins the
+# predicate rather than its absence.
 _assert_predicate_returns_1() {
     run "$@"
     [[ "${status}" -eq 1 ]] \
@@ -186,27 +153,14 @@ _assert_predicate_returns_1() {
 
 # --- sourcing refusals ---
 
-@test "sourcing refuses a jq below the 1.7 floor and names the version found" {
-    local shim="${BATS_TEST_TMPDIR}/old-jq"
-    _make_shim "${shim}" "jq" 'printf "jq-1.6\n"'
+@test "sourcing refuses a jq below the 1.7 floor on stderr alone, naming the version found" {
+    put_stub_on_path jq 'printf "jq-1.6\n"'
 
-    _source_core_with_path "${shim}:${PATH}"
+    _source_core_with_path "${PATH}"
     assert_failure
-    _assert_stderr_contains "bash-mcp-sdk"
-    _assert_stderr_contains "1.7"
-    _assert_stderr_contains "jq-1.6"
-}
-
-@test "sourcing refuses a jq below the floor without writing to stdout" {
-    local shim="${BATS_TEST_TMPDIR}/old-jq"
-    _make_shim "${shim}" "jq" 'printf "jq-1.6\n"'
-
-    _source_core_with_path "${shim}:${PATH}"
-    # The refusal is asserted here too, not only in the test above: without it
-    # this case passes against a file carrying no guard at all, because an
-    # untroubled source writes nothing to stdout either.
-    assert_failure
-    _assert_stderr_contains "jq 1.7 or newer is required"
+    assert_stderr --partial "bash-mcp-sdk"
+    assert_stderr --partial "jq 1.7 or newer is required"
+    assert_stderr --partial "jq-1.6"
     # Stdout carries the JSON-RPC stream; a refusal must not put a byte in it.
     assert_output ''
 }
@@ -220,9 +174,9 @@ _assert_predicate_returns_1() {
     _source_core_with_path "${empty}"
     assert_failure
     assert_output ''
-    _assert_stderr_contains "bash-mcp-sdk"
-    _assert_stderr_contains "jq was not found on PATH"
-    _assert_stderr_contains "package manager"
+    assert_stderr --partial "bash-mcp-sdk"
+    assert_stderr --partial "jq was not found on PATH"
+    assert_stderr --partial "package manager"
 }
 
 @test "the distro-package warning is specific to the below-floor refusal" {
@@ -230,18 +184,19 @@ _assert_predicate_returns_1() {
     # newest and the refusal repeats. The operator has to be told the distro
     # package can itself be the problem — but only on the floor refusal, where
     # that is true, not on the absent one, where installing is the fix.
-    local old="${BATS_TEST_TMPDIR}/old-jq"
-    _make_shim "${old}" "jq" 'printf "jq-1.6\n"'
-    _source_core_with_path "${old}:${PATH}"
+    put_stub_on_path jq 'printf "jq-1.6\n"'
+    _source_core_with_path "${PATH}"
     assert_failure
-    _assert_stderr_contains "a distribution package may itself sit below the floor"
+    assert_stderr --partial "a distribution package may itself sit below the floor"
 
     local empty="${BATS_TEST_TMPDIR}/empty-absent"
     mkdir -p "${empty}"
     _source_core_with_path "${empty}"
     assert_failure
-    [[ "${stderr}" != *"may itself sit below the floor"* ]] \
-        || fail "the jq-absent refusal warned about a distro package; stderr was: ${stderr}"
+    # The absent refusal is what ran, so the missing warning below is its
+    # omission rather than a refusal that never happened.
+    assert_stderr --partial "jq was not found on PATH"
+    refute_stderr --partial "may itself sit below the floor"
 }
 
 @test "sourcing a jq that is on PATH but cannot run names the broken binary" {
@@ -249,45 +204,40 @@ _assert_predicate_returns_1() {
     # wrong architecture, a missing shared library. `jq --version` then leaves
     # the version empty, and the below-floor message would misdirect the
     # operator to upgrade a package that is already current.
-    local shim="${BATS_TEST_TMPDIR}/broken-jq"
-    _make_shim "${shim}" "jq" 'exit 126'
+    put_stub_on_path jq 'exit 126'
 
-    _source_core_with_path "${shim}:${PATH}"
+    _source_core_with_path "${PATH}"
     assert_failure
-    _assert_stderr_contains "bash-mcp-sdk"
-    _assert_stderr_contains "could not be run"
+    assert_stderr --partial "bash-mcp-sdk"
+    assert_stderr --partial "could not be run"
     # The path `command -v jq` resolved, so the operator can see which binary
     # on PATH did not answer.
-    _assert_stderr_contains "${shim}/jq"
+    assert_stderr --partial "$(stub_bin_dir)/jq"
     # The distro-package line belongs to the below-floor refusal, where it is
     # true; on a broken binary the package is not below the floor.
-    [[ "${stderr}" != *"may itself sit below the floor"* ]] \
-        || fail "the broken-jq refusal warned about a distro package; stderr was: ${stderr}"
+    refute_stderr --partial "may itself sit below the floor"
 }
 
 # --- _mcp_install_hint branches, driven through a refusal ---
 
 @test "the hint names brew on Darwin" {
-    local shim="${BATS_TEST_TMPDIR}/darwin"
-    _make_shim "${shim}" "jq" 'printf "jq-1.6\n"'
-    _make_shim "${shim}" "uname" 'printf "Darwin\n"'
-    _make_shim "${shim}" "brew" 'exit 0'
+    put_stub_on_path jq 'printf "jq-1.6\n"'
+    put_stub_on_path uname 'printf "Darwin\n"'
+    put_stub_on_path brew 'exit 0'
 
-    _source_core_with_path "${shim}"
+    _source_core_with_path "$(stub_bin_dir)"
     assert_failure
-    _assert_stderr_contains "brew install jq"
+    assert_stderr --partial "brew install jq"
 }
 
 @test "the hint falls back to the generic line on Darwin without brew" {
-    local shim="${BATS_TEST_TMPDIR}/darwin-no-brew"
-    _make_shim "${shim}" "jq" 'printf "jq-1.6\n"'
-    _make_shim "${shim}" "uname" 'printf "Darwin\n"'
+    put_stub_on_path jq 'printf "jq-1.6\n"'
+    put_stub_on_path uname 'printf "Darwin\n"'
 
-    _source_core_with_path "${shim}"
+    _source_core_with_path "$(stub_bin_dir)"
     assert_failure
-    _assert_stderr_contains "install jq 1.7 or newer with your platform's package manager"
-    [[ "${stderr}" != *"brew"* ]] \
-        || fail "the Darwin hint named brew with no brew on PATH; stderr was: ${stderr}"
+    assert_stderr --partial "install jq 1.7 or newer with your platform's package manager"
+    refute_stderr --partial "brew"
 }
 
 @test "the hint for bash on Darwin names brew and the PATH ordering" {
@@ -296,12 +246,11 @@ _assert_predicate_returns_1() {
     # and the hint is never called with "bash" there; the end-to-end old-Bash
     # case runs against whatever platform the machine reports. Calling the pure
     # helper pins the Darwin branch and its PATH-ordering clause anywhere.
-    local shim="${BATS_TEST_TMPDIR}/darwin-bash"
-    _make_shim "${shim}" "uname" 'printf "Darwin\n"'
-    _make_shim "${shim}" "brew" 'exit 0'
+    put_stub_on_path uname 'printf "Darwin\n"'
+    put_stub_on_path brew 'exit 0'
 
     local out
-    out="$(PATH="${shim}" _mcp_install_hint bash)"
+    out="$(PATH="$(stub_bin_dir)" _mcp_install_hint bash)"
     [[ "${out}" == *"brew install bash"* ]] \
         || fail "hint does not name 'brew install bash'; hint was: ${out}"
     # The ordering instruction itself, not just the mention of /usr/bin: the
@@ -315,11 +264,10 @@ _assert_predicate_returns_1() {
     # A GUI-launched host hands the server a PATH with no brew on it, which is
     # the ordinary macOS case and the one where the fix is a PATH fix — so the
     # ordering clause cannot sit inside the brew probe.
-    local shim="${BATS_TEST_TMPDIR}/darwin-bash-no-brew"
-    _make_shim "${shim}" "uname" 'printf "Darwin\n"'
+    put_stub_on_path uname 'printf "Darwin\n"'
 
     local out
-    out="$(PATH="${shim}" _mcp_install_hint bash)"
+    out="$(PATH="$(stub_bin_dir)" _mcp_install_hint bash)"
     [[ "${out}" == *"install bash 4.1 or newer with your platform's package manager"* ]] \
         || fail "hint lacks the generic install line; hint was: ${out}"
     [[ "${out}" == *"before /usr/bin in the PATH"* ]] \
@@ -329,48 +277,44 @@ _assert_predicate_returns_1() {
 }
 
 @test "the hint names the package manager found on a Linux PATH" {
-    local shim="${BATS_TEST_TMPDIR}/linux"
-    _make_shim "${shim}" "jq" 'printf "jq-1.6\n"'
-    _make_shim "${shim}" "uname" 'printf "Linux\n"'
-    _make_shim "${shim}" "apt-get" 'exit 0'
+    put_stub_on_path jq 'printf "jq-1.6\n"'
+    put_stub_on_path uname 'printf "Linux\n"'
+    put_stub_on_path apt-get 'exit 0'
 
-    _source_core_with_path "${shim}"
+    _source_core_with_path "$(stub_bin_dir)"
     assert_failure
-    _assert_stderr_contains "apt-get install jq"
+    assert_stderr --partial "apt-get install jq"
 }
 
 @test "the hint names apk when that is the Linux package manager present" {
-    local shim="${BATS_TEST_TMPDIR}/linux-apk"
-    _make_shim "${shim}" "jq" 'printf "jq-1.6\n"'
-    _make_shim "${shim}" "uname" 'printf "Linux\n"'
-    _make_shim "${shim}" "apk" 'exit 0'
+    put_stub_on_path jq 'printf "jq-1.6\n"'
+    put_stub_on_path uname 'printf "Linux\n"'
+    put_stub_on_path apk 'exit 0'
 
-    _source_core_with_path "${shim}"
+    _source_core_with_path "$(stub_bin_dir)"
     assert_failure
-    _assert_stderr_contains "apk add jq"
+    assert_stderr --partial "apk add jq"
 }
 
 @test "the hint names dnf when that is the Linux package manager present" {
-    local shim="${BATS_TEST_TMPDIR}/linux-dnf"
-    _make_shim "${shim}" "jq" 'printf "jq-1.6\n"'
-    _make_shim "${shim}" "uname" 'printf "Linux\n"'
-    _make_shim "${shim}" "dnf" 'exit 0'
+    put_stub_on_path jq 'printf "jq-1.6\n"'
+    put_stub_on_path uname 'printf "Linux\n"'
+    put_stub_on_path dnf 'exit 0'
 
-    _source_core_with_path "${shim}"
+    _source_core_with_path "$(stub_bin_dir)"
     assert_failure
-    _assert_stderr_contains "dnf install jq"
+    assert_stderr --partial "dnf install jq"
 }
 
 @test "the hint falls back to a generic line on an unrecognized platform" {
-    local shim="${BATS_TEST_TMPDIR}/unknown"
-    _make_shim "${shim}" "jq" 'printf "jq-1.6\n"'
-    _make_shim "${shim}" "uname" 'printf "Plan9\n"'
+    put_stub_on_path jq 'printf "jq-1.6\n"'
+    put_stub_on_path uname 'printf "Plan9\n"'
 
-    _source_core_with_path "${shim}"
+    _source_core_with_path "$(stub_bin_dir)"
     assert_failure
     # The whole generic line, not a fragment of it: "jq 1.7 or newer" alone is
     # already in the refusal above it, so it would pass with the hint silent.
-    _assert_stderr_contains "install jq 1.7 or newer with your platform's package manager"
+    assert_stderr --partial "install jq 1.7 or newer with your platform's package manager"
 }
 
 # --- end-to-end bash refusal (needs a genuinely old Bash on the machine) ---
@@ -389,47 +333,41 @@ _assert_predicate_returns_1() {
     _source_core_with "${old_bash}"
     assert_failure
     assert_output ''
-    _assert_stderr_contains "bash-mcp-sdk"
-    _assert_stderr_contains "4.1"
-    _assert_stderr_contains "${old_version}"
+    assert_stderr --partial "bash-mcp-sdk"
+    assert_stderr --partial "4.1"
+    assert_stderr --partial "${old_version}"
 }
 
 # --- guard placement relative to the file's own `set -euo pipefail` ---
 
-@test "a refusal leaves the calling shell's errexit setting untouched" {
-    # The block sits above `set -euo pipefail` so a refusal returns non-zero
-    # without touching the calling shell's options. Moved below that line, the
-    # refusal would leave errexit active in a caller that never set it — which
-    # is why `$-` is what this pins. The sourcing shell here has errexit off,
-    # and `|| true` keeps it alive to report its options whether or not the
-    # block leaked `set -e`.
-    local shim="${BATS_TEST_TMPDIR}/old-jq-errexit"
-    _make_shim "${shim}" "jq" 'printf "jq-1.6\n"'
+# A bash script that sources the SDK named by its first argument, then prints
+# a `source=<status>` line, then the errexit, nounset and pipefail settings as
+# `set -o` / `set +o` lines. `|| rc=$?` records the source status without letting
+# errexit end the shell; `shopt -po` returns non-zero when any option is off,
+# which `|| true` absorbs.
+# shellcheck disable=SC2016 # the script is run by a child bash, so "$1" must stay literal here.
+_OPTIONS_PROBE='rc=0; source "$1" || rc=$?; printf "source=%s\n" "${rc}"
+shopt -po errexit nounset pipefail || true'
 
-    local probe
-    probe="source '${CORE_SH}' || true
-case \"\$-\" in *e*) printf 'errexit on\n' ;; *) printf 'errexit off\n' ;; esac"
+@test "a refusal leaves the calling shell's errexit, nounset and pipefail settings untouched" {
+    # The block sits above `set -euo pipefail` so a refusal returns non-zero
+    # without touching the calling shell's options; moved below that line, the
+    # refusal would leave them set in a caller that never set them. The sourcing
+    # shell here has all three off, and the probe reports them with the refusal status.
+    put_stub_on_path jq 'printf "jq-1.6\n"'
 
     # stderr is captured apart so the refusal's own lines do not land in
     # `output` alongside the option report.
-    run --separate-stderr env "PATH=${shim}:${PATH}" "${BASH}" -c "${probe}"
-    assert_output 'errexit off'
-    _assert_stderr_contains "jq 1.7 or newer is required"
+    run --separate-stderr env "PATH=${PATH}" "${BASH}" -c "${_OPTIONS_PROBE}" _ "${CORE_SH}"
+    assert_output $'source=1\nset +o errexit\nset +o nounset\nset +o pipefail'
+    assert_stderr --partial "jq 1.7 or newer is required"
 }
 
-@test "a successful source adopts the file's own shell options" {
+@test "a successful source turns on errexit, nounset and pipefail in the calling shell" {
     # The counterpart to the refusal case above. The file runs `set -euo
-    # pipefail` below the guard, and a sourced file changes the sourcing shell,
-    # so a caller that sources successfully ends with errexit on. The guard
-    # returning before that line is what leaves only the refusal path's options
-    # as it found them.
-    local probe
-    probe="source '${CORE_SH}'
-case \"\$-\" in *e*) printf 'errexit on\n' ;; *) printf 'errexit off\n' ;; esac"
-
-    run env "PATH=${PATH}" "${BASH}" -c "${probe}"
-    assert_success
-    assert_output 'errexit on'
+    # pipefail` below the guard, and a sourced file changes the sourcing shell.
+    run env "PATH=${PATH}" "${BASH}" -c "${_OPTIONS_PROBE}" _ "${CORE_SH}"
+    assert_output $'source=0\nset -o errexit\nset -o nounset\nset -o pipefail'
 }
 
 # --- happy path ---
@@ -438,5 +376,5 @@ case \"\$-\" in *e*) printf 'errexit on\n' ;; *) printf 'errexit off\n' ;; esac"
     _source_core_with_path "${PATH}"
     assert_success
     assert_output ''
-    assert_equal "${stderr}" ''
+    assert_stderr ''
 }

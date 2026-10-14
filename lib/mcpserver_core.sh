@@ -153,9 +153,9 @@ _mcp_jq_meets_floor() {
 }
 
 # bash floor. Below 4.1 the file still parses, so there is no early error to go
-# on: `run_mcp_server` dies on the `exec {_MCP_LIFELINE_FD}<>` redirection with
-# `{_MCP_LIFELINE_FD}: not found`, which an MCP host reports as nothing more
-# than a server that failed to start.
+# on: without this guard, sourcing it dies on the `exec {_MCP_PROTOCOL_FD}>&1`
+# redirection with `exec: {_MCP_PROTOCOL_FD}: not found` (probed on bash 3.2),
+# which an MCP host reports as nothing more than a server that failed to start.
 if [[ -z "${BASH_VERSINFO[0]:-}" ]] \
     || ! _mcp_bash_meets_floor "${BASH_VERSINFO[0]:-}" "${BASH_VERSINFO[1]:-}"; then
     printf '%s\n' "bash-mcp-sdk: bash 4.1 or newer is required; this shell reports ${BASH_VERSION:-unknown}." >&2
@@ -341,9 +341,15 @@ _mcp_tool_text_result() {
         '{"content": [{"type": "text", "text": $text}], "isError": $is_error}'
 }
 
+# Print the response carrying a tool result: $1 is the request id, $2 the isError flag (true|false), $3 the text.
+_mcp_tool_text_response() {
+    local result
+    result=$(_mcp_tool_text_result "$2" "$3")
+    create_response "$1" "$result"
+}
+
 handle_initialize() {
     local id="$1"
-    local params="$2"
 
     log "INFO" "Handling initialize request"
 
@@ -400,8 +406,7 @@ _mcp_tool_schema() {
     # because whether errexit applies here depends on the caller's shape. A
     # tools list that cannot be read is a rejection and never a skip: a
     # validator that could not read its schemas has not validated anything, and
-    # reporting success there would wave every declared constraint through,
-    # which is how the absent-list fallback read.
+    # reporting success there would wave every declared constraint through.
     # The jq failure below is a second such branch. read_json_file's object
     # gate catches a file-borne document that is not an object in the branch
     # above, but the jq branch stays reachable through a file: an object whose
@@ -542,23 +547,16 @@ _mcp_validate_against_schema() {
                 end);
         # Only reached after `type_ok` failed, so a number here has already
         # failed every declared alternative: with `integer` offered it is
-        # necessarily non-integer and reads "number (non-integer)". A list
-        # offering `number` accepts every number, so the `number` conjunct
-        # cannot fire at its call site — it keeps the label correct if the
-        # function is ever called somewhere `type_ok` did not gate.
+        # necessarily non-integer and reads "number (non-integer)".
         def type_label(want; val):
-            (type_names(want)) as $w
-            | if (val | type) == "number"
-                 and ($w | index("integer")) != null
-                 and ($w | index("number")) == null then
+            if (val | type) == "number"
+               and (type_names(want) | index("integer")) != null then
                 "number (non-integer)"
               else
                 (val | type)
               end;
         def type_expected(want):
             type_names(want) | join(" or ");
-        # A property path: a top-level name stays bare, so its messages read as
-        # they did before nested checking; a nested one reads `parent.child`.
         def sub_path($base; $k):
             if $base == "" then $k else $base + "." + $k end;
         # Emit one violation record per defect in value $v against schema $s,
@@ -641,7 +639,7 @@ _mcp_validate_against_schema() {
         def unenforced($s; $path):
             if ($s | type) != "object" then empty else
             ($s | keys[]) as $k
-            | ((if $path == "" then "" else $path + "." end) + $k) as $kp
+            | sub_path($path; $k) as $kp
             | if ($k | IN("type", "properties", "required", "additionalProperties",
                           "items", "enum", "pattern", "minimum", "maximum",
                           "exclusiveMinimum", "exclusiveMaximum", "oneOf",
@@ -666,45 +664,45 @@ _mcp_validate_against_schema() {
         # only ever reads a keyword of the type it expects. A position of the
         # wrong type is reported and not descended into.
         def shape($s; $path):
-            def at($k): (if $path == "" then "" else $path + "." end) + $k;
             if ($s | type) != "object" then
               {p: (if $path == "" then "inputSchema" else $path end), want: "an object"}
             else
               ($s | keys[]) as $k
               | $s[$k] as $kv
+              | sub_path($path; $k) as $kp
               | if $k == "type" then
                   select(($kv | type) != "string"
                          and (($kv | type) != "array" or ($kv | length) == 0
                               or any($kv[]; type != "string")))
-                  | {p: at($k), want: "a string or a non-empty array of strings"}
+                  | {p: $kp, want: "a string or a non-empty array of strings"}
                 elif ($k | IN("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")) then
                   select(($kv | type) != "number")
-                  | {p: at($k), want: "a number"}
+                  | {p: $kp, want: "a number"}
                 elif $k == "pattern" then
                   select(($kv | type) != "string"
                          or (try ("" | test($kv) | false) catch true))
-                  | {p: at($k), want: "a string holding a valid regular expression"}
+                  | {p: $kp, want: "a string holding a valid regular expression"}
                 elif $k == "required" then
                   select(($kv | type) != "array" or any($kv[]; type != "string"))
-                  | {p: at($k), want: "an array of strings"}
+                  | {p: $kp, want: "an array of strings"}
                 elif $k == "enum" then
                   select(($kv | type) != "array")
-                  | {p: at($k), want: "an array"}
+                  | {p: $kp, want: "an array"}
                 elif $k == "properties" then
-                  if ($kv | type) != "object" then {p: at($k), want: "an object"}
-                  else ($kv | keys[]) as $pk | shape($kv[$pk]; at($k) + "." + $pk) end
+                  if ($kv | type) != "object" then {p: $kp, want: "an object"}
+                  else ($kv | keys[]) as $pk | shape($kv[$pk]; $kp + "." + $pk) end
                 elif $k == "items" then
-                  shape($kv; at($k))
+                  shape($kv; $kp)
                 elif $k == "additionalProperties" then
                   if ($kv | type) == "boolean" then empty
-                  elif ($kv | type) == "object" then shape($kv; at($k))
-                  else {p: at($k), want: "a boolean or an object"} end
+                  elif ($kv | type) == "object" then shape($kv; $kp)
+                  else {p: $kp, want: "a boolean or an object"} end
                 elif $k == "oneOf" then
                   if ($kv | type) != "array" or any($kv[]; type != "object") then
-                    {p: at($k), want: "an array of objects"}
+                    {p: $kp, want: "an array of objects"}
                   else
                     range(0; $kv | length) as $i
-                    | shape($kv[$i]; at($k) + "[" + ($i | tostring) + "]")
+                    | shape($kv[$i]; $kp + "[" + ($i | tostring) + "]")
                   end
                 else empty end
             end;
@@ -806,10 +804,9 @@ handle_tools_call() {
     # A tools/call carries its arguments in a params object, so a params of any
     # other type is an Invalid params. This gate runs before `.name` and
     # `.arguments` are read, so those extractions only ever see an object and
-    # none of them can fail. That is what makes the crash fix a property of this
-    # function rather than of its caller: under `set -o posix` bash inherits
-    # errexit into the command substitution those extractions run in, and a
-    # failed one ends the whole server instead of answering the request. It also
+    # none of them can fail, whoever the caller is: under `set -o posix` bash
+    # inherits errexit into the command substitution those extractions run in,
+    # and a failed one would end the whole server instead of answering. It also
     # keeps a non-object params' `Cannot index ...` jq diagnostics off the
     # process's stderr, unrouted through `log`. And it makes handle_tools_call
     # safe as a direct public entry point on its own: a caller passing invalid
@@ -864,15 +861,13 @@ handle_tools_call() {
     fi
     if [[ $lookup_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name argument validation failed: $schema"
-        local lookup_result
-        lookup_result=$(_mcp_tool_text_result true "$schema")
-        create_response "$id" "$lookup_result"
+        _mcp_tool_text_response "$id" true "$schema"
         return
     fi
 
-    # `declare -F` matches a shell function only. `type` also matched an
-    # executable, alias or builtin of that name, so a `tool_x` on PATH answered
-    # for a tool the server never defined.
+    # `declare -F` matches a shell function only: `type` would also match an
+    # executable, alias or builtin of that name, so a `tool_x` on PATH would
+    # answer for a tool the server never defined.
     local func_name="tool_${tool_name}"
     if ! declare -F "$func_name" >/dev/null; then
         create_error_response "$id" -32601 "Tool not found: $tool_name"
@@ -884,25 +879,20 @@ handle_tools_call() {
     validation_error=$(_mcp_validate_against_schema "$schema" "$arguments" "$tool_name") || validation_rc=$?
     if [[ $validation_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name argument validation failed: $validation_error"
-        local invalid_result
-        invalid_result=$(_mcp_tool_text_result true "$validation_error")
-        create_response "$id" "$invalid_result"
+        _mcp_tool_text_response "$id" true "$validation_error"
         return
     fi
 
-    # The tool runs in the background under `set -m` so an in-flight call can be
-    # cancelled by process group. docs/architecture.md §Tool containment.
     # Every file of the call lives in one root that `mktemp -d` creates mode 700
     # and exclusively, so no other user can place anything at a name inside it
     # and the files below are written with a plain `>`.
     # docs/architecture.md §Tool containment.
+    local setup_failure="Cannot run ${tool_name}: its call directory could not be created."
     local call_root root_rc=0
     call_root=$(mktemp -d "${TMPDIR:-/tmp}/mcp-call.XXXXXX" 2>&1) || root_rc=$?
     if [[ $root_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name not run: cannot create its call directory in ${TMPDIR:-/tmp}: ${call_root}"
-        local setup_result
-        setup_result=$(_mcp_tool_text_result true "Cannot run ${tool_name}: its call directory could not be created.")
-        create_response "$id" "$setup_result"
+        _mcp_tool_text_response "$id" true "$setup_failure"
         return
     fi
     # A relative TMPDIR yields a relative root, and a hook that changes
@@ -919,9 +909,7 @@ handle_tools_call() {
     if [[ $mkdir_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name not run: cannot create MCP_CALL_TMPDIR ${call_tmpdir}: ${mkdir_error}"
         _mcp_remove_call_root "$call_root"
-        local setup_result
-        setup_result=$(_mcp_tool_text_result true "Cannot run ${tool_name}: its call directory could not be created.")
-        create_response "$id" "$setup_result"
+        _mcp_tool_text_response "$id" true "$setup_failure"
         return
     fi
     local pid
@@ -929,6 +917,8 @@ handle_tools_call() {
     if [[ -o monitor ]]; then
         monitor_was_enabled=1
     fi
+    # The tool runs in the background under `set -m` so an in-flight call can be
+    # cancelled by process group.
     set -m
     # A lifeline is identified by its directory and FIFO, never by
     # _MCP_LIFELINE_FD: process_request closed and cleared that descriptor on
@@ -978,16 +968,6 @@ handle_tools_call() {
         _wait_tool_call "$pid" "$tool_name" "$output_file"
     fi
 
-    # The call's files are released and the in-flight record truncated before
-    # anything is built from them, so neither the response construction nor the
-    # deferred replay below can run ahead of the clear.
-    # The call root goes first and the record second: the root exists nowhere
-    # but this subshell and the record, so a teardown landing between the steps
-    # reads a record naming a root this dispatch has already released, and its
-    # removal is idempotent, so it loses nothing. Every path that reaches here
-    # has already waited for the wrapper and passed its group to
-    # _kill_tool_group, so no member of the call is left to write into the root
-    # as it is removed. docs/architecture.md §The in-flight record.
     local output=""
     local hook_text=""
     local hook_refused=0
@@ -1020,6 +1000,18 @@ handle_tools_call() {
         elif [[ -e "$call_root/hook-refused" ]]; then
             hook_refused=1
         fi
+        # The call root is removed here, once output and hook_text have been read
+        # out of it; the in-flight record is truncated just below. Both happen
+        # before the response is built or the deferred requests are replayed, so
+        # neither can run ahead of the clear.
+        # The call root goes first and the record second: the root exists
+        # nowhere but this subshell and the record, so a teardown landing
+        # between the steps reads a record naming a root this dispatch has
+        # already released, and its removal is idempotent, so it loses nothing.
+        # Every path that reaches here has already waited for the wrapper and
+        # passed its group to _kill_tool_group, so no member of the call is left
+        # to write into the root as it is removed.
+        # docs/architecture.md §The in-flight record.
         _mcp_remove_call_root "$call_root"
     fi
     # Cleared once per dispatch, whichever way it ended — completed, cancelled,
@@ -1034,22 +1026,16 @@ handle_tools_call() {
         if [[ -n "$hook_text" ]]; then
             # The hook's exit status is discarded: the call is answered by the
             # reason the tool did not run, not by the status the hook chose.
-            local hook_result
-            hook_result=$(_mcp_tool_text_result true "$hook_text")
-            create_response "$id" "$hook_result"
+            _mcp_tool_text_response "$id" true "$hook_text"
         elif [[ $exit_code -ne 0 ]]; then
             if [[ $hook_refused -eq 1 ]]; then
                 log "ERROR" "before-tool hook refused tool $tool_name (status $exit_code)"
             else
                 log "ERROR" "Tool $tool_name failed with exit code $exit_code"
             fi
-            local error_result
-            error_result=$(_mcp_tool_text_result true "Error executing $tool_name: $output")
-            create_response "$id" "$error_result"
+            _mcp_tool_text_response "$id" true "Error executing $tool_name: $output"
         else
-            local result
-            result=$(_mcp_tool_text_result false "$output")
-            create_response "$id" "$result"
+            _mcp_tool_text_response "$id" false "$output"
         fi
     fi
 
@@ -1074,7 +1060,6 @@ handle_tools_call() {
             if [[ -z "$deferred" ]]; then
                 continue
             fi
-            deferred_response=""
             deferred_response=$(process_request "$deferred")
             if [[ -n "$deferred_response" ]]; then
                 printf '%s\n' "$deferred_response"
@@ -1130,10 +1115,11 @@ _wait_tool_call() {
 # Args: $1 = in-flight request id (JSON), $2 = child pid, $3 = tool name,
 #       $4 = original arguments JSON, $5 = tool output file
 # Sets: _MCP_CANCELLED (1 when the call was cancelled, else 0),
-#       _MCP_CHILD_STATUS (the child's exit status), _MCP_DEFERRED_LINES,
+#       _MCP_CHILD_STATUS (the child's exit status), _MCP_DEFERRED_LINES, and
 #       _MCP_EOF_DRAIN (1 when stdin reached EOF, so the server loop stops
-#       after this dispatch), and _MCP_PARTIAL_FILE (the fragment in hand when
-#       the loop ended, empty when there is none)
+#       after this dispatch)
+# Writes: the fragment in hand when an uncancelled call ends to the file
+#       _MCP_PARTIAL_FILE names; nothing when there is none
 _await_tool_call() {
     local id="$1"
     local pid="$2"
@@ -1184,9 +1170,9 @@ _await_tool_call() {
             # fragment is the joined buffer and whatever that read stored.
             # A fragment is only dropped when it is not JSON: one that already
             # parses is the client's last request, sent with no trailing
-            # newline that can now ever arrive, and it is answerable — 3.0.0's
-            # `read || [[ -n "$line" ]]` answered it. It goes through the same
-            # handling as a terminated line below, and the loop then stops.
+            # newline that can now ever arrive, and it is answerable. It goes
+            # through the same handling as a terminated line below, and the
+            # loop then stops.
             # A dropped fragment is unanswerable and its content is whatever
             # the client wrote, so only its length is recorded. The buffer is
             # cleared in both cases: the fragment has been accounted for, and
@@ -1196,11 +1182,11 @@ _await_tool_call() {
             line=""
             if [[ -n "$fragment" ]]; then
                 # The parse test is `jq empty`, which exits zero on any
-                # parseable input: `jq -e '.'` set its status from the
-                # truthiness of the output, so a fragment of `false` or `null`
-                # — both valid JSON — read as a parse failure and was dropped.
-                # `jq empty` also exits zero on input holding no documents, the
-                # empty string and whitespace-only input alike, so the fragment
+                # parseable input: `jq -e '.'` takes its status from the
+                # truthiness of the output, so it would drop a fragment of
+                # `false` or `null`, both valid JSON. `jq empty` also exits
+                # zero on input holding no documents, the empty string and
+                # whitespace-only input alike, so the fragment
                 # reaching this gate need not hold one: the `-n` guard above
                 # excludes only the empty string, and a whitespace-only
                 # fragment is handed on and answered -32700 — the same answer
@@ -1276,13 +1262,16 @@ _await_tool_call() {
 # Args: $1 = tool name, $2 = the call's arguments JSON. The teardown that runs
 #       from a signal handler passes an empty string: it reads the tool's name
 #       and process group out of the in-flight file, which records no
-#       arguments. $3 = the call's output file, which names the call root; when
-#       it is empty, absent, or names no call root, the hook runs with
-#       MCP_CALL_TMPDIR unset rather than set to an empty path.
+#       arguments. $3 = the call root, which the caller has already checked;
+#       when it is empty, the hook runs with MCP_CALL_TMPDIR unset rather than
+#       set to an empty path. $4 = the output path the caller derived that
+#       root from: a non-empty path with an empty root is logged as refused,
+#       here, because only this function knows whether a hook is defined.
 _run_cancel_hook() {
     local tool_name="$1"
     local arguments="$2"
-    local output_file="${3:-}"
+    local call_root="${3:-}"
+    local output_file="${4:-}"
 
     # A function only, as in handle_tools_call: `type` would also run a
     # `tool_<name>_cancel` executable found on PATH.
@@ -1291,19 +1280,14 @@ _run_cancel_hook() {
         return 0
     fi
 
-    local call_root=""
     local call_tmpdir=""
-    if [[ -n "$output_file" ]]; then
-        if _mcp_call_root_of call_root "$output_file"; then
-            call_tmpdir="${call_root}/tmp"
-        else
-            log "WARN" "refusing to derive a call root from ${output_file}: not a call root; cancel hook ${hook} runs with MCP_CALL_TMPDIR unset"
-        fi
+    if [[ -n "$call_root" ]]; then
+        call_tmpdir="${call_root}/tmp"
+    elif [[ -n "$output_file" ]]; then
+        log "WARN" "refusing to derive a call root from ${output_file}: not a call root; cancel hook ${hook} runs with MCP_CALL_TMPDIR unset"
     fi
 
     local hook_pid
-    local waited=0
-    local hook_status=0
     local monitor_was_enabled=0
     if [[ -o monitor ]]; then
         monitor_was_enabled=1
@@ -1313,33 +1297,69 @@ _run_cancel_hook() {
     # into a removal under `/`, so with no directory to name it is unset, which
     # also drops a value inherited from the environment.
     # shellcheck disable=SC2031 # The hook's MCP_CALL_TMPDIR is set in this subshell alone, independent of any wrapper's.
-    ( if [[ -n "${_MCP_LIFELINE_FD:-}" ]]; then exec {_MCP_LIFELINE_FD}>&-; fi; if [[ -n "${_MCP_PROTOCOL_FD:-}" ]]; then exec {_MCP_PROTOCOL_FD}>&-; fi; set +e; if [[ -n "$call_tmpdir" ]]; then export MCP_CALL_TMPDIR="$call_tmpdir"; else unset MCP_CALL_TMPDIR; fi; "$hook" "$arguments" ) >/dev/null 2>&1 </dev/null &
+    ( _mcp_close_protocol_fds; set +e; if [[ -n "$call_tmpdir" ]]; then export MCP_CALL_TMPDIR="$call_tmpdir"; else unset MCP_CALL_TMPDIR; fi; "$hook" "$arguments" ) >/dev/null 2>&1 </dev/null &
     hook_pid=$!
     if [[ "$monitor_was_enabled" == "1" ]]; then
         set -m
     else
         set +m
     fi
-    while kill -0 "$hook_pid" 2>/dev/null \
+    _mcp_reap_with_grace "$hook_pid" "Cancel hook ${hook} for ${tool_name}" "exited"
+    return 0
+}
+
+# Wait out a background job that leads a process group of its own, bounded at
+# _MCP_CANCEL_GRACE_SECONDS: an overrun job's group is SIGKILLed, the job reaped
+# and the overrun logged; a job that finished in time has a non-zero status
+# logged and whatever it left in its group cleared. The status is always 0, so
+# the job cannot change its caller's outcome.
+# The caller spawns the job itself: a function wrapped around the job's body
+# adds a frame, and with errtrace on the ERR trap fires once more at that frame
+# (probed on bash 5.3).
+# Args: $1 = the job's pid, which is the group id it leads,
+#       $2 = what the WARN lines call the job, $3 = the verb its non-zero
+#       status is logged with
+_mcp_reap_with_grace() {
+    local pid="$1"
+    local label="$2"
+    local status_verb="$3"
+    local waited=0
+    local status=0
+
+    while kill -0 "$pid" 2>/dev/null \
         && [[ $waited -lt $((_MCP_CANCEL_GRACE_SECONDS * 10)) ]]; do
         sleep 0.1
         waited=$((waited + 1))
     done
-    if kill -0 "$hook_pid" 2>/dev/null; then
-        kill -KILL -- "-$hook_pid" 2>/dev/null || true
-        wait "$hook_pid" || true
-        log "WARN" "Cancel hook ${hook} for ${tool_name} did not finish within ${_MCP_CANCEL_GRACE_SECONDS}s; killed"
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL -- "-$pid" 2>/dev/null || true
+        wait "$pid" || true
+        log "WARN" "${label} did not finish within ${_MCP_CANCEL_GRACE_SECONDS}s; killed"
     else
-        wait "$hook_pid" || hook_status=$?
-        if [[ $hook_status -ne 0 ]]; then
-            log "WARN" "Cancel hook ${hook} for ${tool_name} exited with status ${hook_status}"
+        wait "$pid" || status=$?
+        if [[ $status -ne 0 ]]; then
+            log "WARN" "${label} ${status_verb} with status ${status}"
         fi
-        # The hook leads a group of its own, which the in-flight record does not
-        # name, so no tombstone is written for it: the call's group is still
+        # The group is the job's own, not the call's group the in-flight record
+        # names, so no tombstone is written for it: a call's group may still be
         # live here and the record has to keep naming it.
-        _kill_tool_group "$hook_pid" "" ""
+        _kill_tool_group "$pid" "" ""
     fi
     return 0
+}
+
+# Close the descriptors the server holds for its own use — the lifeline writer
+# and the protocol stream — and clear the variables naming them, so a later
+# close cannot hit a number the shell has since given to something else.
+_mcp_close_protocol_fds() {
+    if [[ -n "${_MCP_LIFELINE_FD:-}" ]]; then
+        exec {_MCP_LIFELINE_FD}>&-
+        _MCP_LIFELINE_FD=""
+    fi
+    if [[ -n "${_MCP_PROTOCOL_FD:-}" ]]; then
+        exec {_MCP_PROTOCOL_FD}>&-
+        _MCP_PROTOCOL_FD=""
+    fi
 }
 
 # Clear what is left of a tool's process group after its wrapper has been
@@ -1450,8 +1470,8 @@ _mcp_remove_call_root() {
 # off: both run in the wrapper's shell, so a global variable the hook assigns,
 # a directory it changes to, and an EXIT trap it installs reach the tool. The
 # shell options are the exception: those the hook sets are put back before the
-# tool runs, and so are functions: what the hook defines reaches the tool but
-# not the steps this function runs once the hook has returned. Bash scopes
+# tool runs. A function the hook defines reaches the tool but not the steps
+# this function runs once the hook has returned. Bash scopes
 # variables dynamically, so a hook assignment to a name it does not declare
 # `local` writes to the nearest local of that name, in this function or a
 # caller: every value read after the hook is therefore a positional parameter,
@@ -1486,13 +1506,13 @@ _mcp_run_tool() {
         # hook it does stop ends the wrapper before `hook-returned` is written,
         # and is answered as one that called `exit`. A hook that returns
         # non-zero with errexit on would end the wrapper the same way at this
-        # call: the ERR trap fires at the call in this function's frame and
-        # turns errexit off before it takes effect, so the status still reaches
-        # the refusal branch, unless the hook replaced the trap with its own.
+        # call, but the ERR trap below fires there first, in this function's
+        # frame, and turns errexit off, so the status reaches the refusal
+        # branch unless the hook replaced the trap with its own.
         # The FUNCNAME check keeps the trap from turning the hook's own errexit
         # off when errtrace carries it into the hook. It replaces the server's
-        # ERR trap for the hook's duration, as the `if` condition the hook used
-        # to run in suppressed it, and is swapped back after the restore below.
+        # ERR trap for the hook's duration, so the server's trap does not fire
+        # for the hook's failures, and is swapped back after the restore below.
         builtin trap 'if [[ ${FUNCNAME[0]-} == _mcp_run_tool ]]; then builtin set +e; fi' ERR
         builtin set -- "$@" "$(builtin trap -p ERR)"
         # A brace group, not a subshell: its redirection applies without a fork,
@@ -1607,6 +1627,32 @@ _tool_group_has_live_member() {
     return 1
 }
 
+# TERM a tool's process group, give its live members other than the sentinel
+# _MCP_CANCEL_GRACE_SECONDS to exit, and SIGKILL the group if one outlasts the
+# grace. The caller checks the group is still there before calling, and reaps
+# the leader itself where it is that caller's child.
+# Args: $1 = group id, $2 = sentinel pid (empty when unknown), $3 = tool name
+_mcp_term_group_with_grace() {
+    local pgid="$1"
+    local sentinel_pid="$2"
+    local tool_name="$3"
+    local waited=0
+
+    # The wrapper leads its own process group, so the negative pid reaches the
+    # tool and everything it spawned.
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+    while _tool_group_has_live_member "$pgid" "$sentinel_pid" \
+        && [[ $waited -lt $((_MCP_CANCEL_GRACE_SECONDS * 10)) ]]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    if _tool_group_has_live_member "$pgid" "$sentinel_pid"; then
+        kill -KILL -- "-$pgid" 2>/dev/null || true
+        log "WARN" "Tool ${tool_name} ignored SIGTERM; process group killed"
+    fi
+    return 0
+}
+
 # Stop a cancelled tool call: run its optional cancel hook, terminate the
 # child's process group, and reap it. A hook or a child that ignores SIGTERM
 # gets _MCP_CANCEL_GRACE_SECONDS before being killed, so a wedged consumer tool
@@ -1622,30 +1668,20 @@ _teardown_tool_call() {
     local id="$4"
     local output_file="$5"
 
-    _run_cancel_hook "$tool_name" "$arguments" "$output_file"
-
     local call_root=""
+    _mcp_call_root_of call_root "$output_file" || true
+
+    _run_cancel_hook "$tool_name" "$arguments" "$call_root" "$output_file"
+
     local sentinel_pid=""
-    if _mcp_call_root_of call_root "$output_file"; then
+    if [[ -n "$call_root" ]]; then
         sentinel_pid="$(_sentinel_pid_for "${call_root}/sentinel")"
     else
         log "WARN" "refusing to derive a call root from ${output_file}: not a call root"
     fi
 
-    local alive_waited=0
     if kill -0 -- "-$pid" 2>/dev/null; then
-        # The child leads its own process group, so the negative pid reaches
-        # the tool and everything it spawned.
-        kill -TERM -- "-$pid" 2>/dev/null || true
-        while _tool_group_has_live_member "$pid" "$sentinel_pid" \
-            && [[ $alive_waited -lt $((_MCP_CANCEL_GRACE_SECONDS * 10)) ]]; do
-            sleep 0.1
-            alive_waited=$((alive_waited + 1))
-        done
-        if _tool_group_has_live_member "$pid" "$sentinel_pid"; then
-            kill -KILL -- "-$pid" 2>/dev/null || true
-            log "WARN" "Tool ${tool_name} ignored SIGTERM; process group killed"
-        fi
+        _mcp_term_group_with_grace "$pid" "$sentinel_pid" "$tool_name"
     fi
     # Reaped once, after the last signal: the status reflects the signal,
     # which is what a cancellation is expected to look like.
@@ -1662,22 +1698,16 @@ _teardown_tool_call() {
 process_request() {
     local request="$1"
 
-    if [[ "${_MCP_IN_SERVER_LOOP:-0}" == "1" && -n "${_MCP_LIFELINE_FD:-}" ]]; then
-        exec {_MCP_LIFELINE_FD}>&-
-        _MCP_LIFELINE_FD=""
-    fi
-    if [[ "${_MCP_IN_SERVER_LOOP:-0}" == "1" && -n "${_MCP_PROTOCOL_FD:-}" ]]; then
-        exec {_MCP_PROTOCOL_FD}>&-
-        _MCP_PROTOCOL_FD=""
+    if [[ "${_MCP_IN_SERVER_LOOP:-0}" == "1" ]]; then
+        _mcp_close_protocol_fds
     fi
 
-    # Parse gate: exactly one JSON document, of any type. `jq -e '.'` accepted a
-    # line holding two documents — it reports only its last output — and the id
-    # filter below then emitted one line per document, so the joined text
-    # reached `--argjson`, whose rejection ended the server. It also exits
-    # non-zero on a whole document that is `null` or `false`, both of which are
-    # parseable, which is why those two answered -32700 while every other
-    # scalar reached the version arm and answered -32600. The count is read the
+    # Parse gate: exactly one JSON document, of any type. `jq -e '.'` would
+    # accept a line holding two documents — it reports only its last output —
+    # and the id filter below would then emit one line per document, whose
+    # joined text `--argjson` rejects, ending the server. It also exits non-zero
+    # on a whole document that is `null` or `false`, both of which are
+    # parseable and belong in the -32600 arm below. The count is read the
     # way read_json_file reads a file's, with `jq -cs` and a length test; a line
     # jq cannot parse at all fails the substitution, and any other count is a
     # line that is not one document.
@@ -1696,10 +1726,9 @@ process_request() {
     # JSON-RPC 2.0 represents a call as a Request object, so a document of any
     # other type is an Invalid Request. This gate runs before `.jsonrpc`, `.id`,
     # `.method` and `.params` are read, so those extractions only ever see an
-    # object and none of them can fail. That is what makes the crash fix a
-    # property of this function rather than of its caller: process_request no
-    # longer depends on the dispatch site clearing errexit inside the command
-    # substitution. It also keeps a non-object line's `Cannot index ...` jq
+    # object and none of them can fail, so process_request does not depend on
+    # its dispatch site clearing errexit inside the command substitution it
+    # runs in. It also keeps a non-object line's `Cannot index ...` jq
     # diagnostics off the process's stderr, unrouted through `log`.
     if [[ "$(printf '%s\n' "$request" | jq -r 'type')" != "object" ]]; then
         log "ERROR" "JSON-RPC request is not a JSON object"
@@ -1714,12 +1743,13 @@ process_request() {
     jsonrpc=$(echo "$request" | jq -c '.jsonrpc')
     # The id is read by key presence, not with `//`: that operator maps an
     # absent key and a present null to the same output, so a request carrying
-    # `"id": null` was indistinguishable from a notification. `tojson` keeps
-    # the JSON type of a present id, so 7 stays an integer and "7" a string,
-    # and an absent key leaves the empty sentinel the notification gate reads.
+    # `"id": null` would be indistinguishable from a notification. `tojson`
+    # keeps the JSON type of a present id, so 7 stays an integer and "7" a
+    # string, and an absent key leaves the empty sentinel the notification gate
+    # reads.
     id=$(echo "$request" | jq -r 'if has("id") then (.id | tojson) else "" end')
-    # A method is read only when it is a string: `.method // ""` folded a
-    # present `null` or `false` into the empty name, and printed a number or
+    # A method is read only when it is a string: `.method // ""` would fold a
+    # present `null` or `false` into the empty name, and print a number or
     # `true` as a name. The verdict is kept apart from the name, because an
     # empty string is a string method that no handler answers.
     method_is_string=$(echo "$request" | jq -r '(.method | type) == "string"')
@@ -1841,9 +1871,10 @@ process_request() {
 # SIGKILL the tool's process group once the server is gone, however it went.
 # This sentinel blocks on a read of the server's lifeline FIFO.
 # docs/architecture.md §The lifeline.
-# Nothing is ever expected to arrive on that read: a byte would end the wait
-# early and kill the group while the server is still alive, and the only writer
-# in this design never writes.
+# Nothing is ever expected to arrive on that read: a newline written to the
+# FIFO would end the wait early and kill the group while the server is still
+# alive, and the only writer in this design never writes, so the read ends
+# only at EOF, once the last writer is gone.
 _lifeline_sentinel() {
     local read_fd="$1"
 
@@ -1903,28 +1934,20 @@ _server_teardown() {
     # emptied the group, so the id it once named is free to belong to some other
     # process group by now. Nothing is signalled for it, no cancel hook runs,
     # and no grace is polled — only the files the tombstone still names are
-    # released below. A numeric pgid is a call still running, and keeps today's
-    # behaviour.
+    # released below. A numeric pgid is a call still running, and its group is
+    # stopped here if it still exists.
     if [[ -n "${inflight_pid}" && "${inflight_pid}" != "-" ]] \
         && kill -0 -- "-${inflight_pid}" 2>/dev/null; then
-        _run_cancel_hook "${inflight_tool}" "" "${inflight_output}"
+        # The cancel hook is handed the checked root, so a record naming a path
+        # outside a call root runs it with MCP_CALL_TMPDIR unset.
+        _run_cancel_hook "${inflight_tool}" "" "${inflight_root}" "${inflight_output}"
         # The sentinel this call's wrapper recorded in the call root is left
         # out of the group's liveness exactly as in _teardown_tool_call: it
         # ignores TERM and waits on the lifeline, so counting it would hold this
         # teardown for the whole grace on every shutdown.
         local inflight_sentinel
         inflight_sentinel="$(_sentinel_pid_for "${inflight_sentinel_file}")"
-        kill -TERM -- "-${inflight_pid}" 2>/dev/null || true
-        local waited=0
-        while _tool_group_has_live_member "${inflight_pid}" "${inflight_sentinel}" \
-            && [[ $waited -lt $((_MCP_CANCEL_GRACE_SECONDS * 10)) ]]; do
-            sleep 0.1
-            waited=$((waited + 1))
-        done
-        if _tool_group_has_live_member "${inflight_pid}" "${inflight_sentinel}"; then
-            kill -KILL -- "-${inflight_pid}" 2>/dev/null || true
-            log "WARN" "Tool ${inflight_tool} ignored SIGTERM; process group killed"
-        fi
+        _mcp_term_group_with_grace "${inflight_pid}" "${inflight_sentinel}" "${inflight_tool}"
         log "INFO" "Stopped in-flight tool ${inflight_tool} (group ${inflight_pid}) on shutdown"
     fi
 
@@ -1965,17 +1988,8 @@ _server_teardown() {
         _MCP_PARTIAL_FILE=""
     fi
     # Dropping the last writer is what releases a sentinel still waiting; the
-    # group already killed above is the normal way out. The variable is cleared
-    # with the descriptor so a second teardown cannot close a number the shell
-    # has since given to something else.
-    if [[ -n "${_MCP_LIFELINE_FD:-}" ]]; then
-        exec {_MCP_LIFELINE_FD}>&-
-        _MCP_LIFELINE_FD=""
-    fi
-    if [[ -n "${_MCP_PROTOCOL_FD:-}" ]]; then
-        exec {_MCP_PROTOCOL_FD}>&-
-        _MCP_PROTOCOL_FD=""
-    fi
+    # group already killed above is the normal way out.
+    _mcp_close_protocol_fds
     if [[ -n "${_MCP_LIFELINE_DIR:-}" ]]; then
         rm -rf -- "${_MCP_LIFELINE_DIR}"
         _MCP_LIFELINE_DIR=""
@@ -1995,8 +2009,6 @@ _server_teardown() {
     # time. docs/architecture.md §Shutdown.
     if [[ -n "${_MCP_CHAINED_EXIT_TRAP:-}" ]]; then
         local chained_pid=""
-        local chained_waited=0
-        local chained_status=0
         local chained_monitor_was_enabled=0
         if [[ -o monitor ]]; then
             chained_monitor_was_enabled=1
@@ -2009,22 +2021,7 @@ _server_teardown() {
         else
             set +m
         fi
-        while kill -0 "$chained_pid" 2>/dev/null \
-            && [[ $chained_waited -lt $((_MCP_CANCEL_GRACE_SECONDS * 10)) ]]; do
-            sleep 0.1
-            chained_waited=$((chained_waited + 1))
-        done
-        if kill -0 "$chained_pid" 2>/dev/null; then
-            kill -KILL -- "-$chained_pid" 2>/dev/null || true
-            wait "$chained_pid" || true
-            log "WARN" "Chained caller EXIT trap did not finish within ${_MCP_CANCEL_GRACE_SECONDS}s; killed"
-        else
-            wait "$chained_pid" || chained_status=$?
-            if [[ $chained_status -ne 0 ]]; then
-                log "WARN" "Chained caller EXIT trap failed with status ${chained_status}"
-            fi
-            _kill_tool_group "$chained_pid" "" ""
-        fi
+        _mcp_reap_with_grace "$chained_pid" "Chained caller EXIT trap" "failed"
         _MCP_CHAINED_EXIT_TRAP=""
     fi
 
@@ -2169,10 +2166,11 @@ run_mcp_server() {
     # open. The one exception is a joined fragment that already parses as JSON
     # — a request the client did finish writing and never terminated — and the
     # EOF branch below tells that case from an unterminated line by parsing it.
-    # A line a failed read stored with no fragment in hand is dispatched as
-    # before — a client that sent its last request without a trailing newline
-    # is answered rather than ignored.
+    # A line a failed read stored with no fragment in hand is dispatched too, so
+    # a client that sent its last request without a trailing newline is
+    # answered rather than ignored.
     local partial=""
+    local line
     local read_rc=0
     while true; do
         read_rc=0
@@ -2182,16 +2180,17 @@ run_mcp_server() {
             # line, and the bytes this read stored are its tail. The joined
             # fragment is still a line when it parses as JSON: a client that
             # sent its last request with no trailing newline wrote exactly
-            # that, and 3.0.0's `read || [[ -n "$line" ]]` answered it. It
-            # falls through to the dispatch below like any other line.
+            # that, and it is answerable. It falls through to the dispatch
+            # below like any other line.
             # Otherwise both pieces are dropped together, with only their
             # length logged: the content is the client's.
             local eof_fragment
             eof_fragment="${partial}${line}"
             partial=""
             # `jq empty`, not `jq -e '.'`: `-e` takes its status from the
-            # output's truthiness, so a fragment of `false` or `null` read as a
-            # parse failure. Full reason at the same test in _await_tool_call.
+            # output's truthiness, so a fragment of `false` or `null` would
+            # read as a parse failure. Full reason at the same test in
+            # _await_tool_call.
             if ! printf '%s\n' "$eof_fragment" | jq empty >/dev/null 2>&1; then
                 log "WARN" "Discarding a partial line of ${#eof_fragment} characters left by EOF"
                 break

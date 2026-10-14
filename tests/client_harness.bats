@@ -1,10 +1,15 @@
 #!/usr/bin/env bats
-# bats file_tags=mcp-client,client-harness
+# bats file_tags=mcp-core,client-harness
 # Validates tests/test_helper/mcp_client.bash against the server's current
 # behavior: start a fixture server, drive one request at a time over the FIFO,
-# wait for its response, assert silence for an id that was never sent, and tear
-# the server down. Cancellation behavior is covered by cancellation.bats, which
-# uses these helpers to drive the in-flight request stream.
+# wait for its response, assert silence for an id that was never sent and fail
+# for one that was answered, and tear the server down; that a start, or a
+# send, fails loudly when the server exits or writes during startup or is gone;
+# and that the tools/call result assertions accept one response with a result
+# and no error key and refuse an error key, even a null one, and a response
+# whose first of several documents is wrong.
+# Cancellation behavior is covered by cancellation.bats, which uses these
+# helpers to drive the in-flight request stream.
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
@@ -15,13 +20,14 @@ CANCELLATION_SERVER="${REPO_ROOT}/tests/fixtures/cancellation_server.sh"
 
 setup() {
     # Keep the fixture's log out of mktemp's directory and inside the test's.
-    export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
+    # The fixture exports its own config and tools list over these two paths.
+    mcp_test_env "${REPO_ROOT}/tests/fixtures/cancellation_config.json" \
+        "${REPO_ROOT}/tests/fixtures/cancellation_tools_list.json"
     mcp_start_server "${CANCELLATION_SERVER}"
 }
 
 teardown() {
     mcp_stop_server
-    unset MCP_LOG_FILE
 }
 
 @test "mcp_start_server: the server answers initialize with the request id" {
@@ -31,7 +37,7 @@ teardown() {
     assert_success
     local response="${output}"
 
-    run jq -e '.id == 1 and has("result")' <<< "${response}"
+    run jq -e 'has("result") and (has("error") | not)' <<< "${response}"
     assert_success
 }
 
@@ -54,6 +60,76 @@ teardown() {
     run mcp_assert_no_response 99 0.5
     assert_success
     [[ -z "${output}" ]]
+}
+
+@test "mcp_assert_no_response: fails naming the response for an id the server answered" {
+    mcp_send '{"jsonrpc":"2.0","id":9,"method":"ping"}'
+    run mcp_wait_for_response 9 5
+    assert_success
+
+    run mcp_assert_no_response 9 0.5
+
+    assert_equal "${status}" 1
+    assert_output 'mcp_assert_no_response: unexpected response for id 9: {"jsonrpc":"2.0","id":9,"result":{}}'
+}
+
+@test "mcp_assert_tool_result: passes for one response with a result and no error key" {
+    run mcp_assert_tool_result \
+        '{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}' \
+        4 false 'done'
+
+    assert_equal "${status}" 0
+}
+
+@test "mcp_assert_tool_result: fails for a response carrying an error key with a null value" {
+    run mcp_assert_tool_result \
+        '{"jsonrpc":"2.0","id":4,"error":null,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}' \
+        4 false 'done'
+
+    assert_equal "${status}" 1
+    assert_output --partial 'mcp_assert_tool_result: the response does not match'
+}
+
+@test "mcp_assert_tool_result: fails when a wrong response for the id precedes the right one" {
+    local wrong='{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"other"}],"isError":false}}'
+    local right='{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}'
+
+    run mcp_assert_tool_result "$(printf '%s\n%s' "${wrong}" "${right}")" 4 false 'done'
+
+    assert_equal "${status}" 1
+    assert_output --partial 'mcp_assert_tool_result: the response does not match'
+}
+
+@test "mcp_assert_tool_result_file: passes for one response with a result and no error key" {
+    printf 'done' > "${BATS_TEST_TMPDIR}/expected.txt"
+
+    run mcp_assert_tool_result_file \
+        '{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}' \
+        4 false "${BATS_TEST_TMPDIR}/expected.txt"
+
+    assert_equal "${status}" 0
+}
+
+@test "mcp_assert_tool_result_file: fails for a response carrying an error key with a null value" {
+    printf 'done' > "${BATS_TEST_TMPDIR}/expected.txt"
+
+    run mcp_assert_tool_result_file \
+        '{"jsonrpc":"2.0","id":4,"error":null,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}' \
+        4 false "${BATS_TEST_TMPDIR}/expected.txt"
+
+    assert_equal "${status}" 1
+    assert_output --partial 'mcp_assert_tool_result_file: the response does not match'
+}
+
+@test "mcp_assert_tool_result_file: fails when a wrong response for the id precedes the right one" {
+    local wrong='{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"other"}],"isError":false}}'
+    local right='{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}'
+    printf 'done' > "${BATS_TEST_TMPDIR}/expected.txt"
+
+    run mcp_assert_tool_result_file "$(printf '%s\n%s' "${wrong}" "${right}")" 4 false "${BATS_TEST_TMPDIR}/expected.txt"
+
+    assert_equal "${status}" 1
+    assert_output --partial 'mcp_assert_tool_result_file: the response does not match'
 }
 
 @test "mcp_stop_server: leaves no server process running and removes its temp dir" {
@@ -92,8 +168,7 @@ teardown() {
     # and run_mcp_server, then a marker. A start that returned after a fixed
     # short wait would return before the marker exists.
     mcp_stop_server
-    printf '{}' > "${BATS_TEST_TMPDIR}/config.json"
-    printf '[]' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_fixture_files '{"tools": []}'
     write_server "${BATS_TEST_TMPDIR}/slow_start.sh" <<BODY
 sleep 1
 touch "${BATS_TEST_TMPDIR}/startup.done"
@@ -106,8 +181,7 @@ BODY
 
 @test "mcp_start_server: fails when the server writes to the protocol stream during startup" {
     mcp_stop_server
-    printf '{}' > "${BATS_TEST_TMPDIR}/config.json"
-    printf '[]' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_fixture_files '{"tools": []}'
     write_server "${BATS_TEST_TMPDIR}/noisy.sh" <<'BODY'
 printf 'startup noise\n' >&"${_MCP_PROTOCOL_FD}"
 BODY
@@ -140,8 +214,7 @@ BODY
 
 @test "mcp_start_server: fails with the server's stderr when the server exits before serving" {
     mcp_stop_server
-    printf '{}' > "${BATS_TEST_TMPDIR}/config.json"
-    printf '[]' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_fixture_files '{"tools": []}'
     write_server "${BATS_TEST_TMPDIR}/dies.sh" <<< 'echo "startup refused" >&2; exit 1'
 
     run mcp_start_server "${BATS_TEST_TMPDIR}/dies.sh"

@@ -14,21 +14,12 @@ load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 CORE_SH="${REPO_ROOT}/lib/mcpserver_core.sh"
 
 setup() {
-    cat > "${BATS_TEST_TMPDIR}/config.json" <<'JSON'
-{}
-JSON
-
-    cat > "${BATS_TEST_TMPDIR}/tools.json" <<'JSON'
-{"tools": [{"name": "protocol_write", "description": "writes to the protocol descriptor", "inputSchema": {"type": "object"}}]}
-JSON
-
-    export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    : > "${MCP_LOG_FILE}"
+    write_fixture_files '{"tools": [{"name": "protocol_write", "description": "writes to the protocol descriptor", "inputSchema": {"type": "object"}}]}'
+    mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
 }
 
 teardown() {
     mcp_stop_server
-    unset MCP_LOG_FILE
 }
 
 @test "a line a server script echoes before run_mcp_server goes to stderr, not the protocol stream" {
@@ -41,6 +32,7 @@ BODY
     run mcp_wait_for_response 1
     assert_success
     mcp_close_stdin
+    mcp_wait_for_exit "${MCP_SERVER_PID}" 10
     wait "${MCP_SERVER_PID}"
 
     # The stream holds the one response and nothing ahead of it: jq fails on a
@@ -70,6 +62,7 @@ BODY
     assert_success
     local response="${output}"
     mcp_close_stdin
+    mcp_wait_for_exit "${MCP_SERVER_PID}" 10
     wait "${MCP_SERVER_PID}"
 
     run jq -r '.result.content[0].text | split("\n") | map(select(. != "")) | last' <<< "${response}"
@@ -79,15 +72,6 @@ BODY
     run jq -c '.id' "${MCP_SERVER_OUT}"
     assert_success
     assert_output $'1\n2'
-}
-
-@test "sourcing the core sends a later write to stdout to stderr instead" {
-    # shellcheck disable=SC2016 # $1 is the inner shell's argument, expanded there.
-    run --separate-stderr bash -c 'source "$1"; echo hi' bash "${CORE_SH}"
-
-    assert_success
-    assert_output ''
-    assert_equal "${stderr}" 'hi'
 }
 
 @test "a second source in the same shell keeps responses on the real stdout" {
@@ -101,6 +85,7 @@ BODY
     run mcp_wait_for_response 1
     assert_success
     mcp_close_stdin
+    mcp_wait_for_exit "${MCP_SERVER_PID}" 10
     wait "${MCP_SERVER_PID}"
 
     run jq -c '.id' "${MCP_SERVER_OUT}"

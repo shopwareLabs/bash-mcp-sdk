@@ -13,8 +13,8 @@
 # is a static fixture that the cancellation and lifecycle suites drive as a
 # contract, so it stays a file on disk rather than being generated per test.
 #
-# The MCP_* paths default to ${BATS_TEST_TMPDIR}, which a suite's setup() fills
-# with config.json and tools.json. Args: $1 = target path.
+# The MCP_* paths default to ${BATS_TEST_TMPDIR}, where write_fixture_files
+# writes config.json and tools.json. Args: $1 = target path.
 write_server() {
     local path="$1"
     local body
@@ -31,4 +31,19 @@ ${body}
 run_mcp_server
 SERVER
     chmod +x "${path}"
+}
+
+# Write the two files a server reads into BATS_TEST_TMPDIR: config.json holding
+# an empty object, and tools.json holding <tools-list-json>, the paths
+# write_server exports and suites hand to mcp_test_env. The tools list has no
+# default: a caller that wants none passes '{"tools": []}'. Calling it again
+# replaces both files.
+# Usage: write_fixture_files <tools-list-json>
+write_fixture_files() {
+    if [[ $# -ne 1 || -z "$1" ]]; then
+        printf 'usage: write_fixture_files <tools-list-json>\n' >&2
+        return 2
+    fi
+    printf '%s\n' '{}' > "${BATS_TEST_TMPDIR}/config.json"
+    printf '%s\n' "$1" > "${BATS_TEST_TMPDIR}/tools.json"
 }

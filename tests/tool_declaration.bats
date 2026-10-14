@@ -11,49 +11,17 @@
 #   - an unreadable tools list stays an isError result, never -32601.
 # Each "did not run" claim is proved by the marker file the tool would have
 # written, not by the response text alone. Requests are driven through
-# process_request, the real entry point.
-# Before the change every case below except three failed: the dispatched,
-# precedence and object-valued-list cases are guards of behavior the change
-# keeps, and are labelled as such.
+# process_request, the function the server loop hands each request line.
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
+load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
 
 setup() {
-    MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
-    MCP_EXTRA_LOG_FILE=""
-    MCP_CONFIG_FILE="/dev/null"
-    MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
-    PROJECT_ROOT="${BATS_TEST_TMPDIR}"
-    export MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT
+    mcp_test_env /dev/null "${BATS_TEST_TMPDIR}/tools.json"
 
     # shellcheck source=../lib/mcpserver_core.sh
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
-}
-
-teardown() {
-    unset MCP_LOG_FILE MCP_EXTRA_LOG_FILE MCP_CONFIG_FILE MCP_TOOLS_LIST_FILE PROJECT_ROOT
-}
-
-# A tools/call line for tool <name> with <arguments-json>, built with jq so the
-# name and the arguments reach process_request as the JSON they name.
-_call_request() {
-    local name="$1"
-    local arguments_json="$2"
-    jq -nc --arg n "${name}" --argjson a "${arguments_json}" \
-        '{jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: $n, arguments: $a}}'
-}
-
-# Write an executable script named <name> into a directory placed first on
-# PATH. Run, it creates <marker>.
-_put_executable_on_path() {
-    local name="$1"
-    local marker="$2"
-    local bin_dir="${BATS_TEST_TMPDIR}/bin"
-    mkdir -p "${bin_dir}"
-    printf '#!/usr/bin/env bash\n: > %q\n' "${marker}" > "${bin_dir}/${name}"
-    chmod +x "${bin_dir}/${name}"
-    PATH="${bin_dir}:${PATH}"
 }
 
 # Assert <response> is a -32601 `Tool not found: <name>` error for id 1.
@@ -65,15 +33,6 @@ _assert_tool_not_found() {
     assert_success
 }
 
-# Assert <response> is an isError result for id 1 whose text is exactly <text>.
-_assert_is_error_text() {
-    local response="$1"
-    local text="$2"
-    run jq -e --arg t "${text}" \
-        '.id == 1 and .result.isError == true and .result.content[0].text == $t and (.error == null)' <<< "${response}"
-    assert_success
-}
-
 # --- declared and implemented ---
 
 @test "process_request: a declared, implemented tool is dispatched (guard: unchanged behavior)" {
@@ -81,11 +40,10 @@ _assert_is_error_text() {
     local marker="${BATS_TEST_TMPDIR}/x.ran"
     tool_x() { : > "${marker}"; printf 'x done\n'; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    run jq -e '.id == 1 and .result.isError == false and .result.content[0].text == "x done"' <<< "${output}"
-    assert_success
+    mcp_assert_tool_result "${output}" 1 false "x done"
     assert [ -e "${marker}" ]
 }
 
@@ -96,7 +54,7 @@ _assert_is_error_text() {
     local marker="${BATS_TEST_TMPDIR}/x.ran"
     tool_x() { : > "${marker}"; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     _assert_tool_not_found "${output}" x
@@ -109,7 +67,7 @@ _assert_is_error_text() {
     tool_foo() { printf 'foo done\n'; }
     tool_foo_cancel() { : > "${hook_marker}"; }
 
-    run --separate-stderr process_request "$(_call_request foo_cancel '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 foo_cancel '{}')"
 
     assert_success
     _assert_tool_not_found "${output}" foo_cancel
@@ -119,7 +77,7 @@ _assert_is_error_text() {
 @test "process_request: an invalid tool name answers -32602 ahead of the declaration lookup (guard: unchanged behavior)" {
     printf '%s\n' '{"tools": []}' > "${MCP_TOOLS_LIST_FILE}"
 
-    run --separate-stderr process_request "$(_call_request a-b '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 a-b '{}')"
 
     assert_success
     run jq -e '.id == 1 and .error.code == -32602 and .error.message == "Invalid tool name: a-b"' <<< "${output}"
@@ -133,10 +91,10 @@ _assert_is_error_text() {
     local marker="${BATS_TEST_TMPDIR}/x.ran"
     tool_x() { : > "${marker}"; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_is_error_text "${output}" "Cannot validate arguments for x: its entry in ${MCP_TOOLS_LIST_FILE} declares no inputSchema."
+    mcp_assert_tool_result "${output}" 1 true "Cannot validate arguments for x: its entry in ${MCP_TOOLS_LIST_FILE} declares no inputSchema."
     assert [ ! -e "${marker}" ]
 }
 
@@ -145,10 +103,10 @@ _assert_is_error_text() {
     local marker="${BATS_TEST_TMPDIR}/x.ran"
     tool_x() { : > "${marker}"; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_is_error_text "${output}" "Cannot validate arguments for x: its entry in ${MCP_TOOLS_LIST_FILE} declares no inputSchema."
+    mcp_assert_tool_result "${output}" 1 true "Cannot validate arguments for x: its entry in ${MCP_TOOLS_LIST_FILE} declares no inputSchema."
     assert [ ! -e "${marker}" ]
 }
 
@@ -157,10 +115,10 @@ _assert_is_error_text() {
     local marker="${BATS_TEST_TMPDIR}/x.ran"
     tool_x() { : > "${marker}"; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_is_error_text "${output}" "Cannot validate arguments for x: the tool list at ${MCP_TOOLS_LIST_FILE} declares it more than once."
+    mcp_assert_tool_result "${output}" 1 true "Cannot validate arguments for x: the tool list at ${MCP_TOOLS_LIST_FILE} declares it more than once."
     assert [ ! -e "${marker}" ]
 }
 
@@ -171,10 +129,10 @@ _assert_is_error_text() {
     local marker="${BATS_TEST_TMPDIR}/x.ran"
     tool_x() { : > "${marker}"; }
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_is_error_text "${output}" "Missing required parameter(s): n."
+    mcp_assert_tool_result "${output}" 1 true "Missing required parameter(s): n."
     assert [ ! -e "${marker}" ]
 }
 
@@ -185,19 +143,19 @@ _assert_is_error_text() {
     # answer -32601 and hide the unreadable list.
     rm -f -- "${MCP_TOOLS_LIST_FILE}"
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_is_error_text "${output}" "Cannot validate arguments for x: the tool list at ${MCP_TOOLS_LIST_FILE} is missing or does not hold one JSON object."
+    mcp_assert_tool_result "${output}" 1 true "Cannot validate arguments for x: the tool list at ${MCP_TOOLS_LIST_FILE} is missing or does not hold one JSON object."
 }
 
 @test "process_request: a tools list holding a non-object element is an isError result, not -32601, for a tool with no function" {
     printf '%s\n' '{"tools": [1]}' > "${MCP_TOOLS_LIST_FILE}"
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    _assert_is_error_text "${output}" "Cannot validate arguments for x: the tool list at ${MCP_TOOLS_LIST_FILE} does not hold a usable tools list."
+    mcp_assert_tool_result "${output}" 1 true "Cannot validate arguments for x: the tool list at ${MCP_TOOLS_LIST_FILE} does not hold a usable tools list."
 }
 
 # --- executables on PATH ---
@@ -205,9 +163,9 @@ _assert_is_error_text() {
 @test "process_request: a declared tool with no function answers -32601 even when a tool_ executable is on PATH" {
     printf '%s\n' '{"tools": [{"name": "x", "inputSchema": {"type": "object"}}]}' > "${MCP_TOOLS_LIST_FILE}"
     local marker="${BATS_TEST_TMPDIR}/path-tool.ran"
-    _put_executable_on_path tool_x "${marker}"
+    put_stub_on_path tool_x "$(printf ': > %q' "${marker}")"
 
-    run --separate-stderr process_request "$(_call_request x '{}')"
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     _assert_tool_not_found "${output}" x
@@ -216,7 +174,7 @@ _assert_is_error_text() {
 
 @test "_run_cancel_hook: a tool_<name>_cancel executable on PATH is not run as the hook" {
     local marker="${BATS_TEST_TMPDIR}/path-hook.ran"
-    _put_executable_on_path tool_x_cancel "${marker}"
+    put_stub_on_path tool_x_cancel "$(printf ': > %q' "${marker}")"
 
     run _run_cancel_hook x '{}'
 

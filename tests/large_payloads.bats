@@ -16,10 +16,13 @@
 #     validated against its oversized schema is answered;
 #   - a server configuration over 1.1 MB is answered whole on initialize;
 #   - create_response and create_error_response, called directly, build a
-#     1.1 MB result and 1.1 MB data exactly, and fail with status 5 and nothing
+#     1.1 MB result and 1.1 MB data exactly.
+# It also pins, with small inputs, the one-document check that reading this
+# data from stdin with `jq -s` needs:
+#   - create_response and create_error_response fail with status 5 and nothing
 #     on stdout for a result or data that is not exactly one JSON document;
-#   - validate_tool_arguments, called directly, rejects arguments that hold two
-#     JSON documents as not evaluable, rather than validating the first.
+#   - validate_tool_arguments rejects arguments that hold two JSON documents as
+#     not evaluable, rather than validating the first.
 # Protocol cases drive a throwaway server over the FIFO client harness. Builder
 # cases source the SDK into the test shell. Payloads are written to files and
 # handed to jq with --rawfile, never as arguments.
@@ -33,7 +36,7 @@ load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 PAYLOAD_BYTES=1100000
 
 setup() {
-    export MCP_LOG_FILE="${BATS_TEST_TMPDIR}/server.log"
+    mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
     export PAYLOAD_FILE="${BATS_TEST_TMPDIR}/payload.txt"
     export MULTIBYTE_FILE="${BATS_TEST_TMPDIR}/multibyte.txt"
     export ARGS_FILE="${BATS_TEST_TMPDIR}/received-arguments.json"
@@ -42,8 +45,7 @@ setup() {
     # `$(<file)`, which drops both, so the result text is these bytes exactly.
     head -c "${PAYLOAD_BYTES}" /dev/zero | tr '\0' 'x' > "${PAYLOAD_FILE}"
 
-    printf '%s\n' '{}' > "${BATS_TEST_TMPDIR}/config.json"
-    printf '%s\n' '{
+    write_fixture_files '{
         "tools": [
             {"name": "big_output", "inputSchema": {"type": "object"}},
             {"name": "big_failure", "inputSchema": {"type": "object"}},
@@ -55,7 +57,7 @@ setup() {
                 "additionalProperties": false
             }}
         ]
-    }' > "${BATS_TEST_TMPDIR}/tools.json"
+    }'
 
     SERVER="${BATS_TEST_TMPDIR}/server.sh"
 }
@@ -88,27 +90,12 @@ BODY
     mcp_start_server "${SERVER}"
 }
 
-# Assert that the response in ${output} is a result whose isError is
-# <is_error> and whose text is byte-for-byte the content of <expected-file>.
-_assert_result_text() {
-    local is_error="$1"
-    local expected_file="$2"
-    local got_file="${BATS_TEST_TMPDIR}/got.txt"
-    local response="${output}"
-
-    run jq -r '.result.isError' <<< "${response}"
-    assert_output "${is_error}"
-    printf '%s\n' "${response}" | jq -j '.result.content[0].text' > "${got_file}"
-    run cmp "${got_file}" "${expected_file}"
-    assert_equal "${status}" 0
-}
-
 # Send a ping with <id> and assert it is answered.
 _assert_ping_answered() {
     local id="$1"
-    mcp_send "{\"jsonrpc\":\"2.0\",\"id\":${id},\"method\":\"ping\"}"
+    mcp_send "$(mcp_ping_request "${id}")"
     run mcp_wait_for_response "${id}" 10
-    assert_equal "${status}" 0
+    assert_success
 }
 
 # Send the tools/call for <tool> with id 1, wait for its response and assert
@@ -118,18 +105,16 @@ _assert_call_text_then_ping() {
     local tool="$1"
     local is_error="$2"
     local expected_file="$3"
-    mcp_send "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":{}}}"
+    mcp_send "$(mcp_tools_call_request 1 "${tool}" '{}')"
     run mcp_wait_for_response 1 30
-    assert_equal "${status}" 0
-    _assert_result_text "${is_error}" "${expected_file}"
+    assert_success
+    mcp_assert_tool_result_file "${output}" 1 "${is_error}" "${expected_file}"
     _assert_ping_answered 2
 }
 
 # Source the SDK into the test shell, for the cases that call its envelope
-# builders directly. MCP_LOG_FILE is already exported by setup().
+# builders directly. The MCP_* variables are already exported by setup().
 _source_sdk() {
-    export MCP_CONFIG_FILE="${BATS_TEST_TMPDIR}/config.json"
-    export MCP_TOOLS_LIST_FILE="${BATS_TEST_TMPDIR}/tools.json"
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
 }
 
@@ -180,13 +165,12 @@ _source_sdk() {
 
     mcp_send "${request}"
     run mcp_wait_for_response 1 30
-    assert_equal "${status}" 0
-    run jq -r '.result.content[0].text' <<< "${output}"
-    assert_output "recorded"
+    assert_success
+    mcp_assert_tool_result "${output}" 1 false "recorded"
 
     jq -j '.text' "${ARGS_FILE}" > "${BATS_TEST_TMPDIR}/received.txt"
     run cmp "${BATS_TEST_TMPDIR}/received.txt" "${text_file}"
-    assert_equal "${status}" 0
+    assert_success
 }
 
 @test "1.1 MB arguments that the schema rejects come back as the exact validation text" {
@@ -202,8 +186,8 @@ _source_sdk() {
 
     mcp_send "${request}"
     run mcp_wait_for_response 1 30
-    assert_equal "${status}" 0
-    _assert_result_text true "${expected}"
+    assert_success
+    mcp_assert_tool_result_file "${output}" 1 true "${expected}"
 }
 
 @test "a tools list over 1.1 MB is answered whole on tools/list" {
@@ -216,9 +200,9 @@ _source_sdk() {
 
     mcp_send '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
     run mcp_wait_for_response 1 30
-    assert_equal "${status}" 0
+    assert_success
     run jq -e --slurpfile list "${BATS_TEST_TMPDIR}/tools.json" '.result.tools == $list[0].tools' <<< "${output}"
-    assert_equal "${status}" 0
+    assert_success
 }
 
 @test "a tools/call validated against a 1.1 MB schema is answered with the tool's result" {
@@ -228,11 +212,10 @@ _source_sdk() {
     mv "${BATS_TEST_TMPDIR}/tools.big.json" "${BATS_TEST_TMPDIR}/tools.json"
     _start_server ''
 
-    mcp_send '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"record_args","arguments":{"text":"aaa"}}}'
+    mcp_send "$(mcp_tools_call_request 1 record_args '{"text":"aaa"}')"
     run mcp_wait_for_response 1 30
-    assert_equal "${status}" 0
-    run jq -c '[.result.isError, .result.content[0].text]' <<< "${output}"
-    assert_output '[false,"recorded"]'
+    assert_success
+    mcp_assert_tool_result "${output}" 1 false "recorded"
 }
 
 @test "a server configuration over 1.1 MB is answered whole on initialize" {
@@ -242,9 +225,9 @@ _source_sdk() {
 
     mcp_send '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
     run mcp_wait_for_response 1 30
-    assert_equal "${status}" 0
+    assert_success
     run jq -e --slurpfile config "${BATS_TEST_TMPDIR}/config.json" '.result.serverInfo == $config[0].serverInfo' <<< "${output}"
-    assert_equal "${status}" 0
+    assert_success
 }
 
 @test "create_response builds a 1.1 MB result exactly" {
@@ -258,7 +241,7 @@ _source_sdk() {
     create_response 1 "${result}" > "${BATS_TEST_TMPDIR}/got.json" || rc=$?
     assert_equal "${rc}" 0
     run cmp "${BATS_TEST_TMPDIR}/got.json" "${BATS_TEST_TMPDIR}/expected.json"
-    assert_equal "${status}" 0
+    assert_success
 }
 
 @test "create_error_response builds 1.1 MB data exactly" {
@@ -273,7 +256,7 @@ _source_sdk() {
     create_error_response 1 -32603 m "${data}" > "${BATS_TEST_TMPDIR}/got.json" || rc=$?
     assert_equal "${rc}" 0
     run cmp "${BATS_TEST_TMPDIR}/got.json" "${BATS_TEST_TMPDIR}/expected.json"
-    assert_equal "${status}" 0
+    assert_success
 }
 
 @test "create_response fails with status 5 and nothing on stdout for an empty result" {
