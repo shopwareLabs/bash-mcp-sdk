@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [6.0.0] - 2026-10-15
+
 ### Added
 
 - The validator enforces `oneOf`: a value must pass exactly one branch. A value matching no branch or more than one is rejected with `Invalid value(s): <path>=<value> matches no oneOf alternative.` or `... matches <n> oneOf alternatives.`, reported after every other class of defect.
@@ -134,7 +136,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - BATS suites covering the validator, the logging surface, and the guarantee that the file sources nothing and serves the protocol on its own.
 - ShellCheck and BATS in CI.
 
-[Unreleased]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.2.1...HEAD
+[Unreleased]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v6.0.0...HEAD
+[6.0.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.2.1...v6.0.0
 [5.2.1]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.2.0...v5.2.1
 [5.2.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.1.0...v5.2.0
 [5.1.0]: https://github.com/shopwareLabs/bash-mcp-sdk/compare/v5.0.0...v5.1.0
