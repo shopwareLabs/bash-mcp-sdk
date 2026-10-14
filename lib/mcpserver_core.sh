@@ -341,6 +341,13 @@ _mcp_tool_text_result() {
         '{"content": [{"type": "text", "text": $text}], "isError": $is_error}'
 }
 
+# Print the response carrying a tool result: $1 is the request id, $2 the isError flag (true|false), $3 the text.
+_mcp_tool_text_response() {
+    local result
+    result=$(_mcp_tool_text_result "$2" "$3")
+    create_response "$1" "$result"
+}
+
 handle_initialize() {
     local id="$1"
     local params="$2"
@@ -542,15 +549,10 @@ _mcp_validate_against_schema() {
                 end);
         # Only reached after `type_ok` failed, so a number here has already
         # failed every declared alternative: with `integer` offered it is
-        # necessarily non-integer and reads "number (non-integer)". A list
-        # offering `number` accepts every number, so the `number` conjunct
-        # cannot fire at its call site — it keeps the label correct if the
-        # function is ever called somewhere `type_ok` did not gate.
+        # necessarily non-integer and reads "number (non-integer)".
         def type_label(want; val):
-            (type_names(want)) as $w
-            | if (val | type) == "number"
-                 and ($w | index("integer")) != null
-                 and ($w | index("number")) == null then
+            if (val | type) == "number"
+               and (type_names(want) | index("integer")) != null then
                 "number (non-integer)"
               else
                 (val | type)
@@ -641,7 +643,7 @@ _mcp_validate_against_schema() {
         def unenforced($s; $path):
             if ($s | type) != "object" then empty else
             ($s | keys[]) as $k
-            | ((if $path == "" then "" else $path + "." end) + $k) as $kp
+            | sub_path($path; $k) as $kp
             | if ($k | IN("type", "properties", "required", "additionalProperties",
                           "items", "enum", "pattern", "minimum", "maximum",
                           "exclusiveMinimum", "exclusiveMaximum", "oneOf",
@@ -666,45 +668,45 @@ _mcp_validate_against_schema() {
         # only ever reads a keyword of the type it expects. A position of the
         # wrong type is reported and not descended into.
         def shape($s; $path):
-            def at($k): (if $path == "" then "" else $path + "." end) + $k;
             if ($s | type) != "object" then
               {p: (if $path == "" then "inputSchema" else $path end), want: "an object"}
             else
               ($s | keys[]) as $k
               | $s[$k] as $kv
+              | sub_path($path; $k) as $kp
               | if $k == "type" then
                   select(($kv | type) != "string"
                          and (($kv | type) != "array" or ($kv | length) == 0
                               or any($kv[]; type != "string")))
-                  | {p: at($k), want: "a string or a non-empty array of strings"}
+                  | {p: $kp, want: "a string or a non-empty array of strings"}
                 elif ($k | IN("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")) then
                   select(($kv | type) != "number")
-                  | {p: at($k), want: "a number"}
+                  | {p: $kp, want: "a number"}
                 elif $k == "pattern" then
                   select(($kv | type) != "string"
                          or (try ("" | test($kv) | false) catch true))
-                  | {p: at($k), want: "a string holding a valid regular expression"}
+                  | {p: $kp, want: "a string holding a valid regular expression"}
                 elif $k == "required" then
                   select(($kv | type) != "array" or any($kv[]; type != "string"))
-                  | {p: at($k), want: "an array of strings"}
+                  | {p: $kp, want: "an array of strings"}
                 elif $k == "enum" then
                   select(($kv | type) != "array")
-                  | {p: at($k), want: "an array"}
+                  | {p: $kp, want: "an array"}
                 elif $k == "properties" then
-                  if ($kv | type) != "object" then {p: at($k), want: "an object"}
-                  else ($kv | keys[]) as $pk | shape($kv[$pk]; at($k) + "." + $pk) end
+                  if ($kv | type) != "object" then {p: $kp, want: "an object"}
+                  else ($kv | keys[]) as $pk | shape($kv[$pk]; $kp + "." + $pk) end
                 elif $k == "items" then
-                  shape($kv; at($k))
+                  shape($kv; $kp)
                 elif $k == "additionalProperties" then
                   if ($kv | type) == "boolean" then empty
-                  elif ($kv | type) == "object" then shape($kv; at($k))
-                  else {p: at($k), want: "a boolean or an object"} end
+                  elif ($kv | type) == "object" then shape($kv; $kp)
+                  else {p: $kp, want: "a boolean or an object"} end
                 elif $k == "oneOf" then
                   if ($kv | type) != "array" or any($kv[]; type != "object") then
-                    {p: at($k), want: "an array of objects"}
+                    {p: $kp, want: "an array of objects"}
                   else
                     range(0; $kv | length) as $i
-                    | shape($kv[$i]; at($k) + "[" + ($i | tostring) + "]")
+                    | shape($kv[$i]; $kp + "[" + ($i | tostring) + "]")
                   end
                 else empty end
             end;
@@ -864,9 +866,7 @@ handle_tools_call() {
     fi
     if [[ $lookup_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name argument validation failed: $schema"
-        local lookup_result
-        lookup_result=$(_mcp_tool_text_result true "$schema")
-        create_response "$id" "$lookup_result"
+        _mcp_tool_text_response "$id" true "$schema"
         return
     fi
 
@@ -884,9 +884,7 @@ handle_tools_call() {
     validation_error=$(_mcp_validate_against_schema "$schema" "$arguments" "$tool_name") || validation_rc=$?
     if [[ $validation_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name argument validation failed: $validation_error"
-        local invalid_result
-        invalid_result=$(_mcp_tool_text_result true "$validation_error")
-        create_response "$id" "$invalid_result"
+        _mcp_tool_text_response "$id" true "$validation_error"
         return
     fi
 
@@ -896,13 +894,12 @@ handle_tools_call() {
     # and exclusively, so no other user can place anything at a name inside it
     # and the files below are written with a plain `>`.
     # docs/architecture.md §Tool containment.
+    local setup_failure="Cannot run ${tool_name}: its call directory could not be created."
     local call_root root_rc=0
     call_root=$(mktemp -d "${TMPDIR:-/tmp}/mcp-call.XXXXXX" 2>&1) || root_rc=$?
     if [[ $root_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name not run: cannot create its call directory in ${TMPDIR:-/tmp}: ${call_root}"
-        local setup_result
-        setup_result=$(_mcp_tool_text_result true "Cannot run ${tool_name}: its call directory could not be created.")
-        create_response "$id" "$setup_result"
+        _mcp_tool_text_response "$id" true "$setup_failure"
         return
     fi
     # A relative TMPDIR yields a relative root, and a hook that changes
@@ -919,9 +916,7 @@ handle_tools_call() {
     if [[ $mkdir_rc -ne 0 ]]; then
         log "ERROR" "Tool $tool_name not run: cannot create MCP_CALL_TMPDIR ${call_tmpdir}: ${mkdir_error}"
         _mcp_remove_call_root "$call_root"
-        local setup_result
-        setup_result=$(_mcp_tool_text_result true "Cannot run ${tool_name}: its call directory could not be created.")
-        create_response "$id" "$setup_result"
+        _mcp_tool_text_response "$id" true "$setup_failure"
         return
     fi
     local pid
@@ -1034,22 +1029,16 @@ handle_tools_call() {
         if [[ -n "$hook_text" ]]; then
             # The hook's exit status is discarded: the call is answered by the
             # reason the tool did not run, not by the status the hook chose.
-            local hook_result
-            hook_result=$(_mcp_tool_text_result true "$hook_text")
-            create_response "$id" "$hook_result"
+            _mcp_tool_text_response "$id" true "$hook_text"
         elif [[ $exit_code -ne 0 ]]; then
             if [[ $hook_refused -eq 1 ]]; then
                 log "ERROR" "before-tool hook refused tool $tool_name (status $exit_code)"
             else
                 log "ERROR" "Tool $tool_name failed with exit code $exit_code"
             fi
-            local error_result
-            error_result=$(_mcp_tool_text_result true "Error executing $tool_name: $output")
-            create_response "$id" "$error_result"
+            _mcp_tool_text_response "$id" true "Error executing $tool_name: $output"
         else
-            local result
-            result=$(_mcp_tool_text_result false "$output")
-            create_response "$id" "$result"
+            _mcp_tool_text_response "$id" false "$output"
         fi
     fi
 
