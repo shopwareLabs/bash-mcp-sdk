@@ -72,7 +72,7 @@ _serve() {
     mcp_assert_tool_result "${output}" 3 true "Missing required parameter(s): name."
 }
 
-@test "mcpserver_core.sh holds no source or . command" {
+@test "mcpserver_core.sh holds no source or . command in the forms the grep recognizes" {
     # A source or `.` at the start of a line, after &&, || or ;, or after then,
     # do, if, elif, while, until, `!`, builtin or eval. Past the line start a `.` counts only before a quote,
     # `$`, `/`, `~` or `.`, which keeps jq's identity filter (`then . else`) out.

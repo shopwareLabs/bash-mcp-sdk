@@ -558,7 +558,8 @@ mcp_ping_request() {
 
 # --- result and order assertions ---
 
-# Assert <response> answers request <id> with a result, no error member, whose
+# Assert <response> is exactly one JSON document answering request <id> with a
+# result and no error key (a `null` error counts as one), whose
 # isError is <is-error> (`true` or `false`) and whose first content text is
 # <text>: the whole text when <match> is `exact` (the default), or its start
 # when <match> is `prefix`. On a mismatch print the expectation and the
@@ -588,10 +589,11 @@ mcp_assert_tool_result() {
             return 1
             ;;
     esac
-    if ! jq -e --argjson id "${id}" --argjson e "${is_error}" --arg t "${text}" --arg m "${match}" '
-        .id == $id and .result.isError == $e and (.error == null)
-        and (.result.content[0].text as $actual
-             | if $m == "exact" then $actual == $t else ($actual | startswith($t)) end)
+    if ! jq -es --argjson id "${id}" --argjson e "${is_error}" --arg t "${text}" --arg m "${match}" '
+        length == 1 and (.[0]
+            | .id == $id and has("result") and (has("error") | not) and .result.isError == $e
+            and (.result.content[0].text as $actual
+                 | if $m == "exact" then $actual == $t else ($actual | startswith($t)) end))
     ' <<< "${response}" > /dev/null 2>&1; then
         printf 'mcp_assert_tool_result: the response does not match\n  expected: id %s, isError %s, text (%s match): %s\n  actual:   %s\n' \
             "${id}" "${is_error}" "${match}" "${text}" "${response}" >&2
@@ -599,7 +601,8 @@ mcp_assert_tool_result() {
     fi
 }
 
-# Assert <response> answers request <id> with a result, no error member, whose
+# Assert <response> is exactly one JSON document answering request <id> with a
+# result and no error key (a `null` error counts as one), whose
 # isError is <is-error> (`true` or `false`) and whose first content text is
 # exactly the content of <expected-file>. The text never passes through argv, so
 # it may be of any size. On a mismatch print the sizes and the starts of both
@@ -625,9 +628,10 @@ mcp_assert_tool_result_file() {
         printf 'mcp_assert_tool_result_file: no such expected file: %s\n' "${expected_file}" >&2
         return 1
     fi
-    if ! jq -e --argjson id "${id}" --argjson e "${is_error}" --rawfile t "${expected_file}" '
-        .id == $id and .result.isError == $e and (.error == null)
-        and .result.content[0].text == $t
+    if ! jq -es --argjson id "${id}" --argjson e "${is_error}" --rawfile t "${expected_file}" '
+        length == 1 and (.[0]
+            | .id == $id and has("result") and (has("error") | not) and .result.isError == $e
+            and .result.content[0].text == $t)
     ' <<< "${response}" > /dev/null 2>&1; then
         actual="$(jq -c '{id, isError: .result.isError, error, text_chars: (.result.content[0].text | length), text_start: (.result.content[0].text[0:100])}' \
             <<< "${response}" 2>/dev/null)" \

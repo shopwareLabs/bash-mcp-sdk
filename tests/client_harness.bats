@@ -3,8 +3,11 @@
 # Validates tests/test_helper/mcp_client.bash against the server's current
 # behavior: start a fixture server, drive one request at a time over the FIFO,
 # wait for its response, assert silence for an id that was never sent and fail
-# for one that was answered, and tear the server down; and that a start, or a
-# send, fails loudly when the server exits or writes during startup or is gone.
+# for one that was answered, and tear the server down; that a start, or a
+# send, fails loudly when the server exits or writes during startup or is gone;
+# and that the tools/call result assertions accept one response with a result
+# and no error key and refuse an error key, even a null one, and a response
+# whose first of several documents is wrong.
 # Cancellation behavior is covered by cancellation.bats, which uses these
 # helpers to drive the in-flight request stream.
 bats_require_minimum_version 1.11.0
@@ -68,6 +71,65 @@ teardown() {
 
     assert_equal "${status}" 1
     assert_output 'mcp_assert_no_response: unexpected response for id 9: {"jsonrpc":"2.0","id":9,"result":{}}'
+}
+
+@test "mcp_assert_tool_result: passes for one response with a result and no error key" {
+    run mcp_assert_tool_result \
+        '{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}' \
+        4 false 'done'
+
+    assert_equal "${status}" 0
+}
+
+@test "mcp_assert_tool_result: fails for a response carrying an error key with a null value" {
+    run mcp_assert_tool_result \
+        '{"jsonrpc":"2.0","id":4,"error":null,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}' \
+        4 false 'done'
+
+    assert_equal "${status}" 1
+    assert_output --partial 'mcp_assert_tool_result: the response does not match'
+}
+
+@test "mcp_assert_tool_result: fails when a wrong response for the id precedes the right one" {
+    local wrong='{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"other"}],"isError":false}}'
+    local right='{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}'
+
+    run mcp_assert_tool_result "$(printf '%s\n%s' "${wrong}" "${right}")" 4 false 'done'
+
+    assert_equal "${status}" 1
+    assert_output --partial 'mcp_assert_tool_result: the response does not match'
+}
+
+@test "mcp_assert_tool_result_file: passes for one response with a result and no error key" {
+    printf 'done' > "${BATS_TEST_TMPDIR}/expected.txt"
+
+    run mcp_assert_tool_result_file \
+        '{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}' \
+        4 false "${BATS_TEST_TMPDIR}/expected.txt"
+
+    assert_equal "${status}" 0
+}
+
+@test "mcp_assert_tool_result_file: fails for a response carrying an error key with a null value" {
+    printf 'done' > "${BATS_TEST_TMPDIR}/expected.txt"
+
+    run mcp_assert_tool_result_file \
+        '{"jsonrpc":"2.0","id":4,"error":null,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}' \
+        4 false "${BATS_TEST_TMPDIR}/expected.txt"
+
+    assert_equal "${status}" 1
+    assert_output --partial 'mcp_assert_tool_result_file: the response does not match'
+}
+
+@test "mcp_assert_tool_result_file: fails when a wrong response for the id precedes the right one" {
+    local wrong='{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"other"}],"isError":false}}'
+    local right='{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}'
+    printf 'done' > "${BATS_TEST_TMPDIR}/expected.txt"
+
+    run mcp_assert_tool_result_file "$(printf '%s\n%s' "${wrong}" "${right}")" 4 false "${BATS_TEST_TMPDIR}/expected.txt"
+
+    assert_equal "${status}" 1
+    assert_output --partial 'mcp_assert_tool_result_file: the response does not match'
 }
 
 @test "mcp_stop_server: leaves no server process running and removes its temp dir" {
