@@ -837,11 +837,7 @@ BODY
 
 @test "process_request: an mcp_before_tool_call executable on PATH is not run as the hook" {
     local path_marker="${BATS_TEST_TMPDIR}/path-hook.ran"
-    local bin_dir="${BATS_TEST_TMPDIR}/bin"
-    mkdir -p "${bin_dir}"
-    printf '#!/usr/bin/env bash\n: > %q\nexit 1\n' "${path_marker}" > "${bin_dir}/mcp_before_tool_call"
-    chmod +x "${bin_dir}/mcp_before_tool_call"
-    PATH="${bin_dir}:${PATH}"
+    put_stub_on_path mcp_before_tool_call "$(printf ': > %q\nexit 1' "${path_marker}")"
     tool_x() { printf 'tool output\n'; }
 
     run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"

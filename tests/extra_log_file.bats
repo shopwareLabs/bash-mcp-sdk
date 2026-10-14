@@ -72,21 +72,21 @@ teardown() {
 @test "log: does not mirror to stderr by default" {
     run --separate-stderr log "INFO" "no mirror by default"
     assert_success
-    [[ -z "$stderr" ]]
+    assert_stderr ''
 }
 
 @test "log: does not mirror to stderr when MCP_LOG_STDERR is 0" {
     MCP_LOG_STDERR=0
     run --separate-stderr log "INFO" "no mirror when zero"
     assert_success
-    [[ -z "$stderr" ]]
+    assert_stderr ''
 }
 
 @test "log: mirrors to stderr and still writes to MCP_LOG_FILE when MCP_LOG_STDERR is 1" {
     MCP_LOG_STDERR=1
     run --separate-stderr log "INFO" "mirror to stderr test"
     assert_success
-    [[ "$stderr" == *"[INFO] mirror to stderr test"* ]]
+    assert_stderr --partial "[INFO] mirror to stderr test"
     run grep "mirror to stderr test" "${BATS_TEST_TMPDIR}/server.log"
     assert_success
 }
@@ -95,14 +95,14 @@ teardown() {
     MCP_LOG_STDERR=true
     run --separate-stderr log "INFO" "no mirror for true"
     assert_success
-    [[ -z "$stderr" ]]
+    assert_stderr ''
 }
 
 @test "log: does not mirror to stderr for a non-1 value like 2" {
     MCP_LOG_STDERR=2
     run --separate-stderr log "INFO" "no mirror for two"
     assert_success
-    [[ -z "$stderr" ]]
+    assert_stderr ''
 }
 
 # --- a failed log write leaves the server running ---
@@ -132,8 +132,8 @@ BODY
     _run_two_pings
     assert_equal "$status" 0
     assert_equal "$(printf '%s\n' "$output" | jq -c '.id' | paste -sd, -)" "1,2"
-    [[ "$stderr" == *"mcp: cannot write log file ${missing}"* ]]
-    [[ "$stderr" != *"No such file or directory"* ]]
+    assert_stderr --partial "mcp: cannot write log file ${missing}"
+    refute_stderr --partial "No such file or directory"
 }
 
 @test "log: an unwritable MCP_EXTRA_LOG_FILE leaves the server answering and exiting 0" {
@@ -144,8 +144,8 @@ BODY
     _run_two_pings
     assert_equal "$status" 0
     assert_equal "$(printf '%s\n' "$output" | jq -c '.id' | paste -sd, -)" "1,2"
-    [[ "$stderr" == *"mcp: cannot write log file ${missing}"* ]]
-    [[ "$stderr" != *"No such file or directory"* ]]
+    assert_stderr --partial "mcp: cannot write log file ${missing}"
+    refute_stderr --partial "No such file or directory"
     run grep -c '\[INFO\]' "${BATS_TEST_TMPDIR}/server.log"
     assert_success
 }
@@ -184,9 +184,9 @@ export MCP_LOG_STDERR=1
 BODY
     _run_two_pings
     assert_equal "$status" 0
-    [[ "$stderr" == *"mcp: cannot write log file ${missing}"* ]]
-    [[ "$stderr" != *"No such file or directory"* ]]
-    [[ "$stderr" == *"] [INFO] "* ]]
+    assert_stderr --partial "mcp: cannot write log file ${missing}"
+    refute_stderr --partial "No such file or directory"
+    assert_stderr --partial "] [INFO] "
 }
 
 # --- log() escapes line breaks in the message ---

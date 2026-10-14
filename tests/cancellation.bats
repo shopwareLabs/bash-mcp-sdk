@@ -625,13 +625,7 @@ teardown() {
     # the sentinel's group-id read stay answered.
     local real_ps
     real_ps="$(type -P ps)"
-    local stub_dir="${BATS_TEST_TMPDIR}/stub-bin"
-    mkdir -p "${stub_dir}"
-    printf '#!/bin/sh\ncase "$*" in *"pgid=,pid="*) exit 127 ;; esac\nexec %s "$@"\n' \
-        "${real_ps}" > "${stub_dir}/ps"
-    chmod +x "${stub_dir}/ps"
-    PATH="${stub_dir}:${PATH}"
-    export PATH
+    put_stub_on_path ps "$(printf 'case "$*" in *"pgid=,pid="*) exit 127 ;; esac\nexec %s "$@"' "${real_ps}")"
 
     export SLOW_SECS=8
     mcp_start_server "${CANCELLATION_SERVER}"

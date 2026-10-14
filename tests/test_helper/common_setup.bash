@@ -31,3 +31,30 @@ mcp_test_env() {
     export MCP_TOOLS_LIST_FILE="$2"
     unset MCP_EXTRA_LOG_FILE MCP_LOG_STDERR
 }
+
+# The per-test directory put_stub_on_path writes its stubs into.
+stub_bin_dir() {
+    printf '%s\n' "${BATS_TEST_TMPDIR}/bin"
+}
+
+# Write an executable named <name> into the per-test stub directory and put that
+# directory to the front of PATH when it is not on PATH yet. A directory already on
+# PATH stays where it is, so repeated calls in one test keep it first. <body> is the
+# whole script after a `#!/bin/sh` line, so it is POSIX sh and needs no bash on PATH.
+# Calling it again for another name adds to the same directory.
+# Usage: put_stub_on_path <name> <body>
+put_stub_on_path() {
+    if [[ $# -ne 2 || -z "$1" || -z "$2" ]]; then
+        printf 'usage: put_stub_on_path <name> <body>\n' >&2
+        return 2
+    fi
+    local bin_dir
+    bin_dir="$(stub_bin_dir)"
+    mkdir -p "${bin_dir}"
+    printf '#!/bin/sh\n%s\n' "$2" > "${bin_dir}/$1"
+    chmod +x "${bin_dir}/$1"
+    case ":${PATH}:" in
+        *":${bin_dir}:"*) ;;
+        *) export PATH="${bin_dir}:${PATH}" ;;
+    esac
+}

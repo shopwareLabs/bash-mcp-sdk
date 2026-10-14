@@ -27,18 +27,6 @@ setup() {
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
 }
 
-# Write an executable script named <name> into a directory placed first on
-# PATH. Run, it creates <marker>.
-_put_executable_on_path() {
-    local name="$1"
-    local marker="$2"
-    local bin_dir="${BATS_TEST_TMPDIR}/bin"
-    mkdir -p "${bin_dir}"
-    printf '#!/usr/bin/env bash\n: > %q\n' "${marker}" > "${bin_dir}/${name}"
-    chmod +x "${bin_dir}/${name}"
-    PATH="${bin_dir}:${PATH}"
-}
-
 # Assert <response> is a -32601 `Tool not found: <name>` error for id 1.
 _assert_tool_not_found() {
     local response="$1"
@@ -178,7 +166,7 @@ _assert_tool_not_found() {
 @test "process_request: a declared tool with no function answers -32601 even when a tool_ executable is on PATH" {
     printf '%s\n' '{"tools": [{"name": "x", "inputSchema": {"type": "object"}}]}' > "${MCP_TOOLS_LIST_FILE}"
     local marker="${BATS_TEST_TMPDIR}/path-tool.ran"
-    _put_executable_on_path tool_x "${marker}"
+    put_stub_on_path tool_x "$(printf ': > %q' "${marker}")"
 
     run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
@@ -189,7 +177,7 @@ _assert_tool_not_found() {
 
 @test "_run_cancel_hook: a tool_<name>_cancel executable on PATH is not run as the hook" {
     local marker="${BATS_TEST_TMPDIR}/path-hook.ran"
-    _put_executable_on_path tool_x_cancel "${marker}"
+    put_stub_on_path tool_x_cancel "$(printf ': > %q' "${marker}")"
 
     run _run_cancel_hook x '{}'
 
