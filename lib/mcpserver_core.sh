@@ -983,9 +983,8 @@ handle_tools_call() {
         # errexit or nounset stopped it, or a signal killed the wrapper. In each
         # case the tool never ran. The capture is read only here, where nothing
         # removed it. A status above 128 names no single cause: `wait` reports
-        # death by signal N and an exit with status 128+N alike, and on bash
-        # 4.4 and 5.3 a hook that errexit stops at a command that failed with
-        # 141 exits with 141 (bash 4.1 to 4.3 exit with 1 there).
+        # death by signal N and an exit with status 128+N alike, and a hook
+        # that errexit stops at a command that failed with 141 exits with 141.
         # docs/architecture.md §Tool containment.
         if [[ -e "$call_root/hook-running" && ! -e "$call_root/hook-returned" ]]; then
             if [[ $exit_code -gt 128 ]]; then
@@ -1043,31 +1042,29 @@ handle_tools_call() {
     # Requests that arrived while the tool ran are answered after the
     # in-flight response, in the order they were received.
     local deferred deferred_response
-    if [[ ${#_MCP_DEFERRED_LINES[@]} -gt 0 ]]; then
-        # A replayed line that is itself a tools/call must not read stdin. This
-        # subshell is still the one that owns the stream while the replays run,
-        # so a nested poll would take the bytes of the fragment this dispatch has
-        # already handed to the read loop — or of the next request — as its own
-        # deferred line and consume them. With the flag cleared the replay takes
-        # the no-read path, a plain blocking call, so a replayed call runs to
-        # completion with no cancellation window: a cancellation naming it
-        # arrives later in the stream and is dropped as matching nothing. Only
-        # this subshell's copy is cleared, and it is put back before the
-        # EOF-drain check below reads the state this dispatch actually ended in.
-        local outer_in_server_loop
-        outer_in_server_loop="${_MCP_IN_SERVER_LOOP:-0}"
-        _MCP_IN_SERVER_LOOP=0
-        for deferred in "${_MCP_DEFERRED_LINES[@]}"; do
-            if [[ -z "$deferred" ]]; then
-                continue
-            fi
-            deferred_response=$(process_request "$deferred")
-            if [[ -n "$deferred_response" ]]; then
-                printf '%s\n' "$deferred_response"
-            fi
-        done
-        _MCP_IN_SERVER_LOOP="$outer_in_server_loop"
-    fi
+    # A replayed line that is itself a tools/call must not read stdin. This
+    # subshell is still the one that owns the stream while the replays run,
+    # so a nested poll would take the bytes of the fragment this dispatch has
+    # already handed to the read loop — or of the next request — as its own
+    # deferred line and consume them. With the flag cleared the replay takes
+    # the no-read path, a plain blocking call, so a replayed call runs to
+    # completion with no cancellation window: a cancellation naming it
+    # arrives later in the stream and is dropped as matching nothing. Only
+    # this subshell's copy is cleared, and it is put back before the
+    # EOF-drain check below reads the state this dispatch actually ended in.
+    local outer_in_server_loop
+    outer_in_server_loop="${_MCP_IN_SERVER_LOOP:-0}"
+    _MCP_IN_SERVER_LOOP=0
+    for deferred in "${_MCP_DEFERRED_LINES[@]}"; do
+        if [[ -z "$deferred" ]]; then
+            continue
+        fi
+        deferred_response=$(process_request "$deferred")
+        if [[ -n "$deferred_response" ]]; then
+            printf '%s\n' "$deferred_response"
+        fi
+    done
+    _MCP_IN_SERVER_LOOP="$outer_in_server_loop"
 
     # A line the client had left half-written when the tool ended has already
     # left this dispatch through the partial-line file, written by the poll loop
@@ -1545,9 +1542,9 @@ _mcp_run_tool() {
         builtin eval "builtin ${5//$'\n'/$'\n'builtin }"
         builtin eval "builtin ${10//$'\n'/$'\n'builtin }"
         # An ERR trap the hook installed and still in force stays, and reaches
-        # the tool when errtrace is on; otherwise the trap in force before the
-        # hook is put back. With errtrace off, bash 4.1 to 4.3 drop the hook's
-        # trap when it returns and leave the SDK's, so that branch runs there.
+        # the tool when errtrace is on. When the trap in force is still the
+        # SDK's own, because the hook left it in place, the trap in force before
+        # the hook is put back.
         if [[ "$(builtin trap -p ERR)" == "$8" ]]; then
             if [[ -n $7 ]]; then
                 builtin eval "builtin $7"
@@ -1880,11 +1877,6 @@ _lifeline_sentinel() {
     local read_fd="$1"
 
     trap '' TERM INT HUP
-
-    # A server may turn posix mode on, and posix mode turns process substitution
-    # off on Bash 4.1 to 5.0. The sentinel is a background process of its own,
-    # so turning posix mode off here changes no other process.
-    builtin set +o posix
 
     local pgid=""
     local entry_pid entry_pgid
