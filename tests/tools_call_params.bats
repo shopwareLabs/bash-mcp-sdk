@@ -18,13 +18,14 @@ bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
 load "${BATS_TEST_DIRNAME}/test_helper/mcp_client"
+load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 CORE_SH="${REPO_ROOT}/lib/mcpserver_core.sh"
 
 setup() {
-    mcp_test_env /dev/null "${BATS_TEST_TMPDIR}/tools.json"
+    mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
 
-    printf '%s\n' '{"tools": []}' > "${MCP_TOOLS_LIST_FILE}"
+    write_fixture_files '{"tools": []}'
 
     # shellcheck source=../lib/mcpserver_core.sh
     source "${CORE_SH}"
@@ -136,7 +137,7 @@ _session_input() {
 _assert_non_string_name_rejected() {
     local params_json="$1"
     local marker="${BATS_TEST_TMPDIR}/true.ran"
-    printf '%s\n' '{"tools": [{"name": "true", "inputSchema": {"type": "object"}}]}' > "${MCP_TOOLS_LIST_FILE}"
+    write_fixture_files '{"tools": [{"name": "true", "inputSchema": {"type": "object"}}]}'
     tool_true() { : > "${marker}"; }
 
     run --separate-stderr process_request "$(_raw_params_request "${params_json}")"
@@ -169,7 +170,7 @@ _assert_non_string_name_rejected() {
 
 @test "process_request: the string tool name true is dispatched (guard: unchanged behavior)" {
     local marker="${BATS_TEST_TMPDIR}/true.ran"
-    printf '%s\n' '{"tools": [{"name": "true", "inputSchema": {"type": "object"}}]}' > "${MCP_TOOLS_LIST_FILE}"
+    write_fixture_files '{"tools": [{"name": "true", "inputSchema": {"type": "object"}}]}'
     tool_true() { : > "${marker}"; printf 'ran true\n'; }
 
     run --separate-stderr process_request "$(mcp_tools_call_request 1 true '{}')"
@@ -239,7 +240,7 @@ _assert_non_string_method_rejected() {
 
 @test "process_request: a tool name with a trailing newline or a NUL answers -32602 with the name JSON-encoded and does not run the tool" {
     local marker="${BATS_TEST_TMPDIR}/echo.ran"
-    printf '%s\n' '{"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}' > "${MCP_TOOLS_LIST_FILE}"
+    write_fixture_files '{"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}'
     tool_echo() { : > "${marker}"; }
     local name request
     # Each name is held as JSON text, because a bash variable cannot hold a NUL.

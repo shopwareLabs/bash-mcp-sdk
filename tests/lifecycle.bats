@@ -136,9 +136,7 @@ teardown() {
     # group id there and kill nothing. `set -o posix` goes after the `source`
     # line, which Bash 4.1 to 5.0 cannot parse in posix mode.
     export TOOL_SLEEP_PID_FILE="${BATS_TEST_TMPDIR}/sleep.pid"
-    printf '%s\n' '{}' > "${BATS_TEST_TMPDIR}/config.json"
-    printf '%s\n' '{"tools": [{"name": "hold", "inputSchema": {"type": "object"}}]}' \
-        > "${BATS_TEST_TMPDIR}/tools.json"
+    write_fixture_files '{"tools": [{"name": "hold", "inputSchema": {"type": "object"}}]}'
     local server="${BATS_TEST_TMPDIR}/posix_server.sh"
     write_server "${server}" <<'BODY'
 set -o posix

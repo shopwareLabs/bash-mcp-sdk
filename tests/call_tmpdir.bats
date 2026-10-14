@@ -44,8 +44,7 @@ setup() {
     export EXIT_MARKER="${BATS_TEST_TMPDIR}/exit-trap.ran"
     export CANCEL_HOOK_FILE="${BATS_TEST_TMPDIR}/cancel-hook"
 
-    printf '%s\n' '{}' > "${MCP_CONFIG_FILE}"
-    printf '%s\n' '{
+    write_fixture_files '{
         "tools": [
             {"name": "x", "inputSchema": {"type": "object"}},
             {"name": "nested", "inputSchema": {"type": "object"}},
@@ -53,7 +52,7 @@ setup() {
             {"name": "recorder", "inputSchema": {"type": "object"}},
             {"name": "stubborn_recorder", "inputSchema": {"type": "object"}}
         ]
-    }' > "${MCP_TOOLS_LIST_FILE}"
+    }'
 
     # The harness server. Both tools record a state file in their call
     # directory, install an EXIT trap, publish the directory's path last — so a

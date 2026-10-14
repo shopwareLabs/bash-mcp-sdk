@@ -42,8 +42,7 @@ setup() {
     # `$(<file)`, which drops both, so the result text is these bytes exactly.
     head -c "${PAYLOAD_BYTES}" /dev/zero | tr '\0' 'x' > "${PAYLOAD_FILE}"
 
-    printf '%s\n' '{}' > "${BATS_TEST_TMPDIR}/config.json"
-    printf '%s\n' '{
+    write_fixture_files '{
         "tools": [
             {"name": "big_output", "inputSchema": {"type": "object"}},
             {"name": "big_failure", "inputSchema": {"type": "object"}},
@@ -55,7 +54,7 @@ setup() {
                 "additionalProperties": false
             }}
         ]
-    }' > "${BATS_TEST_TMPDIR}/tools.json"
+    }'
 
     SERVER="${BATS_TEST_TMPDIR}/server.sh"
 }

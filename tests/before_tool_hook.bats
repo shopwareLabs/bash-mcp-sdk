@@ -54,14 +54,13 @@ load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 setup() {
     mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
 
-    printf '%s\n' '{}' > "${MCP_CONFIG_FILE}"
-    printf '%s\n' '{
+    write_fixture_files '{
         "tools": [
             {"name": "x", "inputSchema": {"type": "object", "properties": {"n": {"type": "integer"}}, "additionalProperties": false}},
             {"name": "nested", "inputSchema": {"type": "object"}},
             {"name": "inner", "inputSchema": {"type": "object"}}
         ]
-    }' > "${MCP_TOOLS_LIST_FILE}"
+    }'
 
     # shellcheck source=../lib/mcpserver_core.sh
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
@@ -857,7 +856,7 @@ BODY
 @test "a cancellation stops a hook blocked in sleep, and the tool never runs" {
     export HOOK_SLEEP_PID_FILE="${BATS_TEST_TMPDIR}/hook-sleep.pid"
     export TOOL_MARKER="${BATS_TEST_TMPDIR}/tool.ran"
-    printf '%s\n' '{"tools": [{"name": "blocked", "inputSchema": {"type": "object"}}]}' > "${MCP_TOOLS_LIST_FILE}"
+    write_fixture_files '{"tools": [{"name": "blocked", "inputSchema": {"type": "object"}}]}'
     local server="${BATS_TEST_TMPDIR}/server.sh"
     write_server "${server}" <<'BODY'
 mcp_before_tool_call() {

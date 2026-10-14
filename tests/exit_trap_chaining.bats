@@ -16,14 +16,7 @@ CORE_SH="${REPO_ROOT}/lib/mcpserver_core.sh"
 setup() {
     # Only the case that drives a request reads these, but every server script
     # this suite writes points at the same pair.
-    cat > "${BATS_TEST_TMPDIR}/config.json" <<'JSON'
-{}
-JSON
-
-    cat > "${BATS_TEST_TMPDIR}/tools.json" <<'JSON'
-{"tools": []}
-JSON
-
+    write_fixture_files '{"tools": []}'
     mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
     # The log exists and is empty, so the case that asserts a line is absent
     # fails on a missing line, not on a missing file.
@@ -225,7 +218,9 @@ BODY
     # The wrapped shape docs/server-contract.md prescribes: the handler is
     # installed in this shell, and the call is isolated in a subshell. The
     # subshell does not capture the handler, so it runs once, from the
-    # wrapping shell's own exit.
+    # wrapping shell's own exit. The script is built by hand because
+    # write_server ends it with a bare run_mcp_server and puts its body after
+    # `source`, so it can neither wrap the call nor place the trap before it.
     cat > "${BATS_TEST_TMPDIR}/server.sh" <<SERVER
 #!/usr/bin/env bash
 set -euo pipefail

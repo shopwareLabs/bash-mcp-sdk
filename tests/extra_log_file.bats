@@ -110,8 +110,7 @@ teardown() {
 # Write the server script and the files it reads into BATS_TEST_TMPDIR; the
 # body on stdin runs between `source` and `run_mcp_server`.
 _write_logging_server() {
-    printf '{}\n' > "${BATS_TEST_TMPDIR}/config.json"
-    printf '{"tools": []}\n' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_fixture_files '{"tools": []}'
     write_server "${BATS_TEST_TMPDIR}/server.sh"
 }
 

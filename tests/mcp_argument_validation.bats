@@ -18,9 +18,10 @@
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
+load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 setup() {
-    mcp_test_env /dev/null "${BATS_TEST_TMPDIR}/tools.json"
+    mcp_test_env "${BATS_TEST_TMPDIR}/config.json" "${BATS_TEST_TMPDIR}/tools.json"
 
     # Fixture tool list:
     #   strict — required:[number], additionalProperties:false, repo/mode carry enums
@@ -52,8 +53,8 @@ setup() {
     #   short  — a property using minLength, which is not enforced
     #   anyof  — an anyOf nested in a property's oneOf branch
     #   rootone — a oneOf at the root schema: exactly one of a and b is required
-    cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
-{
+    # shellcheck disable=SC2016 # the JSON is a literal: its regex anchors and "$schema" must not expand.
+    write_fixture_files '{
   "tools": [
     {
       "name": "strict",
@@ -232,8 +233,7 @@ setup() {
       }
     }
   ]
-}
-JSON
+}'
 
     source "${REPO_ROOT}/lib/mcpserver_core.sh"
 
@@ -278,7 +278,7 @@ JSON
 }
 
 @test "validate_tool_arguments: a declared entry with no inputSchema is rejected" {
-    printf '%s\n' '{"tools": [{"name": "bare", "description": "no schema"}]}' > "${MCP_TOOLS_LIST_FILE}"
+    write_fixture_files '{"tools": [{"name": "bare", "description": "no schema"}]}'
     run validate_tool_arguments "bare" '{}'
     assert_failure 1
     assert_output "Cannot validate arguments for bare: its entry in ${MCP_TOOLS_LIST_FILE} declares no inputSchema."
@@ -410,8 +410,7 @@ JSON
 # including violations of the key that *was* declared. These two schemas
 # each declare exactly one of the pair, so each pins its own key.
 @test "validate_tool_arguments: an items schema declaring only type (no enum) still catches a type violation" {
-    cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
-{
+    write_fixture_files '{
   "tools": [
     {
       "name": "counts",
@@ -423,8 +422,7 @@ JSON
       }
     }
   ]
-}
-JSON
+}'
     run validate_tool_arguments "counts" '{"values": [1, "not-a-number"]}'
     assert_failure
     assert_output --partial "Invalid array item(s):"
@@ -432,8 +430,7 @@ JSON
 }
 
 @test "validate_tool_arguments: an items schema declaring only enum (no type) still catches an enum violation" {
-    cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
-{
+    write_fixture_files '{
   "tools": [
     {
       "name": "colors",
@@ -445,8 +442,7 @@ JSON
       }
     }
   ]
-}
-JSON
+}'
     run validate_tool_arguments "colors" '{"values": ["red", "purple"]}'
     assert_failure
     assert_output --partial "Invalid array item(s):"
@@ -456,8 +452,7 @@ JSON
 # Regression: membership was tested with jq `index`, which on an array value
 # is a subsequence search, so an array made of allowed members was accepted.
 @test "validate_tool_arguments: an array value made of enum members is rejected by a property enum" {
-    cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
-{
+    write_fixture_files '{
   "tools": [
     {
       "name": "picks",
@@ -469,16 +464,14 @@ JSON
       }
     }
   ]
-}
-JSON
+}'
     run validate_tool_arguments "picks" '{"a": ["x", "y"]}'
     assert_failure 1
     assert_output 'Invalid value(s): a="["x","y"]" (allowed: x, y).'
 }
 
 @test "validate_tool_arguments: an array element equal to the item enum's members is rejected" {
-    cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
-{
+    write_fixture_files '{
   "tools": [
     {
       "name": "nested",
@@ -490,8 +483,7 @@ JSON
       }
     }
   ]
-}
-JSON
+}'
     run validate_tool_arguments "nested" '{"values": [["a", "b"]]}'
     assert_failure 1
     assert_output 'Invalid array item(s): values[0]=["a","b"] (allowed: a, b).'
@@ -890,8 +882,7 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
 }
 
 @test "validate_tool_arguments: a fractional array element at 2^52 against an integer items type is rejected and names the index" {
-    cat > "${MCP_TOOLS_LIST_FILE}" <<'JSON'
-{
+    write_fixture_files '{
   "tools": [
     {
       "name": "counts",
@@ -903,8 +894,7 @@ BADRANGE_MESSAGE="Cannot validate arguments for badrange: its inputSchema keywor
       }
     }
   ]
-}
-JSON
+}'
     run validate_tool_arguments "counts" '{"values": [1, 4503599627370496.5]}'
     assert_failure
     assert_output --partial "Invalid array item(s):"
@@ -1116,7 +1106,7 @@ _assert_shape_refused() {
         arguments_json="$3"
     fi
     local marker="${BATS_TEST_TMPDIR}/shape.ran"
-    jq -nc --argjson s "${schema_json}" '{tools: [{name: "shape", inputSchema: $s}]}' > "${MCP_TOOLS_LIST_FILE}"
+    write_fixture_files "$(jq -nc --argjson s "${schema_json}" '{tools: [{name: "shape", inputSchema: $s}]}')"
     tool_shape() { : > "${marker}"; }
     local params
     params=$(jq -nc --argjson a "${arguments_json}" '{name: "shape", arguments: $a}')
@@ -1412,7 +1402,7 @@ AP_SHAPE="a boolean or an object"
 # every keyword the schema would need the validator to enforce.
 @test "handle_tools_call: an unknown keyword beside a wrong-typed one answers the unenforced-keyword message" {
     local marker="${BATS_TEST_TMPDIR}/shape.ran"
-    printf '%s\n' '{"tools": [{"name": "shape", "inputSchema": {"type": "object", "properties": {"x": {"minLength": 1, "required": false}}}}]}' > "${MCP_TOOLS_LIST_FILE}"
+    write_fixture_files '{"tools": [{"name": "shape", "inputSchema": {"type": "object", "properties": {"x": {"minLength": 1, "required": false}}}}]}'
     tool_shape() { : > "${marker}"; }
 
     run handle_tools_call 1 '{"name": "shape", "arguments": {}}'
@@ -1437,7 +1427,7 @@ Cannot validate arguments for shape: its inputSchema uses keyword(s) this valida
 
 # Replace the tools list with one tool `one` declaring <schema-json>.
 _write_one_tool() {
-    jq -nc --argjson s "$1" '{tools: [{name: "one", inputSchema: $s}]}' > "${MCP_TOOLS_LIST_FILE}"
+    write_fixture_files "$(jq -nc --argjson s "$1" '{tools: [{name: "one", inputSchema: $s}]}')"
 }
 
 @test "validate_tool_arguments: a type list naming null accepts null (guard: unchanged behavior)" {

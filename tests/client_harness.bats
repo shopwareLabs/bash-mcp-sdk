@@ -93,8 +93,7 @@ teardown() {
     # and run_mcp_server, then a marker. A start that returned after a fixed
     # short wait would return before the marker exists.
     mcp_stop_server
-    printf '{}' > "${BATS_TEST_TMPDIR}/config.json"
-    printf '[]' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_fixture_files '[]'
     write_server "${BATS_TEST_TMPDIR}/slow_start.sh" <<BODY
 sleep 1
 touch "${BATS_TEST_TMPDIR}/startup.done"
@@ -107,8 +106,7 @@ BODY
 
 @test "mcp_start_server: fails when the server writes to the protocol stream during startup" {
     mcp_stop_server
-    printf '{}' > "${BATS_TEST_TMPDIR}/config.json"
-    printf '[]' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_fixture_files '[]'
     write_server "${BATS_TEST_TMPDIR}/noisy.sh" <<'BODY'
 printf 'startup noise\n' >&"${_MCP_PROTOCOL_FD}"
 BODY
@@ -141,8 +139,7 @@ BODY
 
 @test "mcp_start_server: fails with the server's stderr when the server exits before serving" {
     mcp_stop_server
-    printf '{}' > "${BATS_TEST_TMPDIR}/config.json"
-    printf '[]' > "${BATS_TEST_TMPDIR}/tools.json"
+    write_fixture_files '[]'
     write_server "${BATS_TEST_TMPDIR}/dies.sh" <<< 'echo "startup refused" >&2; exit 1'
 
     run mcp_start_server "${BATS_TEST_TMPDIR}/dies.sh"
