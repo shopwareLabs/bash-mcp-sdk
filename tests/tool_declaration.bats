@@ -11,10 +11,7 @@
 #   - an unreadable tools list stays an isError result, never -32601.
 # Each "did not run" claim is proved by the marker file the tool would have
 # written, not by the response text alone. Requests are driven through
-# process_request, the real entry point.
-# Before the change every case below except three failed: the dispatched,
-# precedence and object-valued-list cases are guards of behavior the change
-# keeps, and are labelled as such.
+# process_request, the function the server loop hands each request line.
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"

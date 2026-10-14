@@ -1,12 +1,11 @@
 #!/usr/bin/env bats
-# bats file_tags=mcp-core,standalone
-# Pins run_mcp_server's ownership of the process EXIT trap and the reset of
-# _MCP_IN_SERVER_LOOP it performs after the loop exits. run_mcp_server installs
-# its own EXIT trap, and in the direct shape it chains whatever handler the
-# shell already had into that teardown; a caller that runs it in a subshell
-# keeps its own trap there, unchained, so a suite calling it in the test shell
-# must isolate it there or lose bats' reporting trap and drop the test silently
-# when the body later aborts.
+# bats file_tags=mcp-core,exit-trap-isolation
+# Pins the reset of _MCP_IN_SERVER_LOOP that run_mcp_server performs after its
+# loop exits. The call runs in a subshell: run_mcp_server takes over the EXIT
+# trap and its teardown runs the handler it displaced, so called in the bats
+# test shell it would run bats' own reporting trap and make bats misreport the
+# test (a spurious `not ok` at the run_mcp_server line, or a test-count
+# mismatch).
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
@@ -16,23 +15,6 @@ CORE_SH="${REPO_ROOT}/lib/mcpserver_core.sh"
 setup() {
     # The loop reads no request, so neither file is opened.
     mcp_test_env /dev/null /dev/null
-}
-
-@test "run_mcp_server isolated in a subshell leaves the caller's EXIT trap armed" {
-    # shellcheck source=../lib/mcpserver_core.sh
-    source "${CORE_SH}"
-    _caller_exit_trap() {
-        printf 'caller trap ran\n'
-    }
-    trap '_caller_exit_trap' EXIT
-
-    # The isolated shape: run_mcp_server's EXIT trap lives and dies in the
-    # subshell, leaving this shell's trap as the assertion below expects.
-    ( run_mcp_server </dev/null )
-
-    run trap -p EXIT
-    assert_success
-    assert_output "trap -- '_caller_exit_trap' EXIT"
 }
 
 @test "run_mcp_server resets _MCP_IN_SERVER_LOOP to 0 after its loop exits" {

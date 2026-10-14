@@ -5,13 +5,13 @@
 # shell, with the tool name and the validated arguments JSON:
 #   - it runs with errexit off and stdin at /dev/null, as the tool does;
 #   - a hook that returns 0 has its output discarded, and what it sets — a
-#     variable, the working directory, an EXIT trap — reaches the tool, while
-#     a shell option it sets does not;
+#     variable, exported or not, the working directory, an EXIT trap — reaches
+#     the tool, while a shell option it sets does not;
 #   - a variable the hook assigns does not change which tool function runs,
 #     the arguments it receives, or how the call is reported;
-#   - a function the hook defines reaches the tool, but not the SDK's own steps
-#     after the hook returns, and neither does a PATH the hook rewrites: those
-#     steps reach no external command;
+#   - a function the hook defines and a PATH it rewrites reach the tool, but
+#     not the SDK's own steps after the hook returns: those steps reach no
+#     function the hook can shadow and no external command;
 #   - a hook that returns non-zero stops the call with an isError result that
 #     carries the hook's output, the tool does not run, and the log records a
 #     refusal rather than a tool failure;
@@ -37,14 +37,16 @@
 #   - a nested handle_tools_call inside a tool runs the hook again;
 #   - a cancellation stops a hook that blocks;
 #   - with a hook defined, a tool's background child stays in the call's
-#     process group and is killed when the call ends.
+#     process group, so it is killed when the call ends, when a cancellation
+#     stops the call, when the server shuts down, and by the lifeline sentinel
+#     when the server is SIGKILLed.
 # Each "did not run" claim is proved by the marker file the hook or the tool
-# would have written. Requests are driven through process_request; the
-# errexit and cancellation cases drive a throwaway server over the FIFO client
+# would have written. Tests named `process_request:` call it directly; the
+# rest need the server loop and drive a throwaway server over the FIFO client
 # harness.
-# process_request runs under `run --separate-stderr`: bash can report a failed
-# job-control setpgid for the wrapper on stderr, and that line is not part of
-# the response the assertions parse.
+# process_request runs under `run --separate-stderr` or with stderr discarded:
+# bash can report a failed job-control setpgid for the wrapper on stderr, and
+# that line is not part of the response the assertions parse.
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
@@ -68,12 +70,12 @@ setup() {
 
 teardown() {
     mcp_stop_server
-    unset HOOK_SLEEP_PID_FILE TOOL_MARKER MCP_SERVER_INSTANCE
+    unset HOOK_SLEEP_PID_FILE TOOL_MARKER TOOL_CHILD_PID_FILE MCP_SERVER_INSTANCE MCP_SERVER_PGID
 }
 
 # --- no hook ---
 
-@test "process_request: with no hook defined the tool result is the tool's output (guard: unchanged behavior)" {
+@test "process_request: with no hook defined the tool result is the tool's output" {
     tool_x() { printf 'tool output\n'; }
 
     run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
@@ -84,36 +86,41 @@ teardown() {
 
 # --- a hook that succeeds ---
 
-@test "process_request: a successful hook's stdout and stderr stay out of the tool result" {
+@test "process_request: after a hook that returns 0 the tool runs, and the hook's stdout and stderr stay out of its result" {
     local hook_marker="${BATS_TEST_TMPDIR}/hook.ran"
+    local tool_marker="${BATS_TEST_TMPDIR}/tool.ran"
     mcp_before_tool_call() {
         : > "${hook_marker}"
         printf 'AUDIT\n'
         printf 'AUDIT\n' >&2
         return 0
     }
-    tool_x() { printf 'tool output\n'; }
+    tool_x() { : > "${tool_marker}"; printf 'tool output\n'; }
 
     run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
     assert [ -e "${hook_marker}" ]
+    assert [ -e "${tool_marker}" ]
     mcp_assert_tool_result "${output}" 1 false "tool output"
 }
 
-@test "process_request: a variable the hook assigns and a directory it changes to reach the tool" {
+@test "process_request: a variable the hook assigns, a variable it exports and a directory it changes to reach the tool" {
     local hook_dir="${BATS_TEST_TMPDIR}/hook-dir"
     mkdir -p "${hook_dir}"
     mcp_before_tool_call() {
         HOOK_STATE="from-hook"
+        export HOOK_ENV="exported-by-hook"
         cd "${hook_dir}" || return 1
     }
-    tool_x() { printf '%s %s\n' "${HOOK_STATE:-unset}" "${PWD}"; }
+    # printenv is a child process, so it sees HOOK_ENV only through the
+    # environment the tool hands its children.
+    tool_x() { printf '%s %s %s\n' "${HOOK_STATE:-unset}" "$(printenv HOOK_ENV)" "${PWD}"; }
 
     run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    mcp_assert_tool_result "${output}" 1 false "from-hook ${hook_dir}"
+    mcp_assert_tool_result "${output}" 1 false "from-hook exported-by-hook ${hook_dir}"
 }
 
 @test "process_request: a function the hook defines still reaches the tool" {
@@ -134,31 +141,49 @@ teardown() {
     assert_equal "$(<"${hook_rm_file}")" "hook rm"
 }
 
-@test "process_request: functions the hook defines do not divert the SDK's own steps" {
-    # TMPDIR is the test's own so that the call's root is observable after the
-    # call: it is the only evidence that the SDK, and not the hook's `rm`,
-    # removed it.
-    export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
-    mkdir -p "${TMPDIR}"
-    local tool_marker="${BATS_TEST_TMPDIR}/tool.ran"
+@test "process_request: set and shopt functions the hook defines do not divert the SDK's option restore" {
     mcp_before_tool_call() {
-        rm() { :; }
+        builtin set -f
+        builtin shopt -s nullglob
+        set() { :; }
         shopt() { :; }
-        printf() { :; }
         return 0
     }
-    tool_x() { : > "${tool_marker}"; }
+    # The hook's set and shopt reach the tool too, so the tool reads the options
+    # through $- and BASHOPTS rather than by calling either.
+    tool_x() {
+        local noglob=off nullglob=off
+        [[ $- == *f* ]] && noglob=on
+        [[ :${BASHOPTS}: == *:nullglob:* ]] && nullglob=on
+        echo "noglob=${noglob} nullglob=${nullglob}"
+    }
 
     run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    # The hook returned 0, so the tool ran and the call succeeded: a
-    # `hook-running` marker the hook's `rm` kept from being removed would have
-    # answered "ended the call" instead.
-    mcp_assert_tool_result "${output}" 1 false ""
-    assert [ -e "${tool_marker}" ]
-    run mcp_count_call_roots "${TMPDIR}"
-    assert_output "0"
+    mcp_assert_tool_result "${output}" 1 false "noglob=off nullglob=off"
+}
+
+@test "process_request: a printf function the hook defines does not take over the SDK's output of a refusing hook" {
+    local shadow_marker="${BATS_TEST_TMPDIR}/printf-shadow.ran"
+    local tool_marker="${BATS_TEST_TMPDIR}/tool.ran"
+    mcp_before_tool_call() {
+        printf() { : > "${shadow_marker}"; }
+        # The hook's own output goes through the builtin, so a call to the
+        # function can only come from a later step of the SDK.
+        builtin printf 'denied by policy\n'
+        return 3
+    }
+    tool_x() { : > "${tool_marker}"; printf 'tool output\n'; }
+
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
+
+    assert_success
+    # The refusal writes the hook's captured output back with the builtin; the
+    # shadow would write nothing, and the result text would end after "x: ".
+    mcp_assert_tool_result "${output}" 1 true "Error executing x: denied by policy"
+    assert [ ! -e "${shadow_marker}" ]
+    assert [ ! -e "${tool_marker}" ]
 }
 
 @test "process_request: the hook receives the tool name and the arguments JSON the tool receives" {
@@ -178,6 +203,7 @@ teardown() {
 
 @test "process_request: the hook runs with errexit off and stdin at /dev/null" {
     local hook_log="${BATS_TEST_TMPDIR}/hook.log"
+    local response_file="${BATS_TEST_TMPDIR}/response"
     mcp_before_tool_call() {
         local read_status=0
         IFS= read -r -t 2 _ || read_status=$?
@@ -186,12 +212,14 @@ teardown() {
     }
     tool_x() { printf 'tool output\n'; }
 
-    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')" < /dev/zero
+    # Called in the test shell, not under `run`: the wrapper inherits the
+    # test's errexit, and job control is on, so bash does not hand the wrapper
+    # /dev/null by itself as it does a background job in a command substitution.
+    process_request "$(mcp_tools_call_request 1 x '{}')" < /dev/zero > "${response_file}" 2>/dev/null
 
-    assert_success
-    mcp_assert_tool_result "${output}" 1 false "tool output"
-    # Status 1 is EOF. A read from /dev/zero, the stdin this test hands
-    # process_request, never sees a newline and times out above 128.
+    mcp_assert_tool_result "$(<"${response_file}")" 1 false "tool output"
+    # Status 1 is EOF. A read from /dev/zero never sees a newline and times out
+    # above 128.
     assert_equal "$(<"${hook_log}")" "read status 1, ran past false"
 }
 
@@ -245,14 +273,19 @@ teardown() {
     # errexit is ignored, and the wrapper inherits that, so a leaked errexit
     # would not end the tool there.
     local server="${BATS_TEST_TMPDIR}/server.sh"
+    # The server script turns nounset and pipefail off, so the tool sees either
+    # only if the hook's reached it; the wrapper turns errexit off itself.
     write_server "${server}" <<'BODY'
+set +u +o pipefail
 mcp_before_tool_call() {
     set -euo pipefail
     return 0
 }
 tool_x() {
     false
-    printf 'done\n'
+    false | true
+    local pipeline_status=$?
+    printf 'pipeline=%s unset=[%s]\n' "${pipeline_status}" "${undefined_in_tool}"
 }
 BODY
     mcp_start_server "${server}"
@@ -261,40 +294,12 @@ BODY
     run mcp_wait_for_response 1 5
 
     assert_success
-    mcp_assert_tool_result "${output}" 1 false "done"
+    # A leaked errexit ends the tool at `false`, a leaked nounset at the unset
+    # expansion, and a leaked pipefail reports the pipeline's status as 1.
+    mcp_assert_tool_result "${output}" 1 false "pipeline=0 unset=[]"
 }
 
-@test "a hook stopped by the errexit it turned on ends the call, and the tool does not run" {
-    # Driven over the server loop for the reason the test above gives: a direct
-    # process_request under `run` ignores the hook's errexit too.
-    export TOOL_MARKER="${BATS_TEST_TMPDIR}/tool.ran"
-    local server="${BATS_TEST_TMPDIR}/server.sh"
-    write_server "${server}" <<'BODY'
-mcp_before_tool_call() {
-    set -e
-    false
-    printf 'continued\n'
-    return 0
-}
-tool_x() {
-    : > "${TOOL_MARKER}"
-    printf 'tool ran\n'
-}
-BODY
-    mcp_start_server "${server}"
-
-    mcp_send "$(mcp_tools_call_request 1 x '{}')"
-    run mcp_wait_for_response 1 5
-
-    assert_success
-    # The exact text proves the hook stopped at `false`: had it gone on, its
-    # `continued` line would follow the message.
-    mcp_assert_tool_result "${output}" 1 true \
-        "mcp_before_tool_call ended the call instead of returning; tool x did not run."
-    assert [ ! -e "${TOOL_MARKER}" ]
-}
-
-@test "a hook with errexit on that returns non-zero is answered as a refusal" {
+@test "a hook with errexit on that returns non-zero is answered as a refusal (guard: unchanged behavior)" {
     export TOOL_MARKER="${BATS_TEST_TMPDIR}/tool.ran"
     local server="${BATS_TEST_TMPDIR}/server.sh"
     write_server "${server}" <<'BODY'
@@ -368,12 +373,14 @@ BODY
     run mcp_wait_for_response 1 5
 
     assert_success
+    # The exact text proves the hook stopped at `false`: had it gone on, its
+    # `after` line would follow `before`.
     mcp_assert_tool_result "${output}" 1 true \
         "$(printf 'mcp_before_tool_call ended the call instead of returning; tool x did not run.\nbefore')"
     assert [ ! -e "${TOOL_MARKER}" ]
 }
 
-@test "a hook stopped by its nounset ends the call, and the tool does not run" {
+@test "a hook stopped by its nounset ends the call, and the tool does not run (guard: unchanged behavior)" {
     export TOOL_MARKER="${BATS_TEST_TMPDIR}/tool.ran"
     local server="${BATS_TEST_TMPDIR}/server.sh"
     write_server "${server}" <<'BODY'
@@ -447,30 +454,6 @@ BODY
 
     assert_success
     mcp_assert_tool_result "${output}" 1 false "$(printf 'server-err\ndone')"
-}
-
-@test "with a hook defined, the tool runs with the errtrace the server script turned on" {
-    local server="${BATS_TEST_TMPDIR}/server.sh"
-    write_server "${server}" <<'BODY'
-set -E
-mcp_before_tool_call() {
-    return 0
-}
-tool_x() {
-    if [[ $- == *E* ]]; then
-        printf 'errtrace on\n'
-    else
-        printf 'errtrace off\n'
-    fi
-}
-BODY
-    mcp_start_server "${server}"
-
-    mcp_send "$(mcp_tools_call_request 1 x '{}')"
-    run mcp_wait_for_response 1 5
-
-    assert_success
-    mcp_assert_tool_result "${output}" 1 false "errtrace on"
 }
 
 @test "an ERR trap the hook installs reaches the tool" {
@@ -571,7 +554,7 @@ BODY
     mcp_assert_tool_result "${output}" 1 false "inherit_errexit=off posix=on"
 }
 
-@test "a hook that runs set -o posix leaves errtrace and functrace off when extdebug is on" {
+@test "a hook that runs set -o posix leaves errtrace and functrace off when extdebug is on (guard: unchanged behavior)" {
     if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
         skip "bash ${BASH_VERSION}: extdebug does not change errtrace or functrace before 4.4"
     fi
@@ -642,23 +625,22 @@ BODY
 
 # --- a hook that rewrites PATH ---
 
-@test "process_request: a hook that empties PATH does not stop the call or strand a marker" {
+@test "process_request: a PATH the hook empties reaches the tool, and the call still succeeds" {
     mcp_before_tool_call() {
         # shellcheck disable=SC2123 # the hook rewrites PATH deliberately: the tool must run with a search path naming nothing.
         PATH=/nonexistent
         return 0
     }
-    tool_x() { printf 'done\n'; }
+    tool_x() { printf 'PATH=%s\n' "${PATH}"; }
 
     run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
 
     assert_success
-    # Nothing the SDK runs after the hook returns may reach for an external
-    # command: with a PATH naming nothing, an external step fails with 127, the
-    # marker that records the hook's return is never written, and a hook that
-    # returned is answered as one that ended the call. The tool reaches for
-    # builtins only, so it runs whatever PATH holds.
-    mcp_assert_tool_result "${output}" 1 false "done"
+    # With a PATH naming nothing, an SDK step after the hook that reached for an
+    # external command would fail with 127 before the marker recording the
+    # hook's return is written, and the call would be answered as one the hook
+    # ended. The tool uses builtins only, so it runs whatever PATH holds.
+    mcp_assert_tool_result "${output}" 1 false "PATH=/nonexistent"
 }
 
 @test "process_request: a hook that empties PATH and refuses is still answered as a refusal" {
@@ -741,18 +723,6 @@ BODY
     mcp_assert_tool_result "${output}" 1 true \
         "$(printf 'mcp_before_tool_call ended the call instead of returning; tool x did not run.\nX')"
     assert [ ! -e "${tool_marker}" ]
-}
-
-@test "process_request: a hook that returns 0 still runs the tool (guard: unchanged behavior)" {
-    local tool_marker="${BATS_TEST_TMPDIR}/tool.ran"
-    mcp_before_tool_call() { printf 'checked\n'; return 0; }
-    tool_x() { : > "${tool_marker}"; printf 'tool output\n'; }
-
-    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
-
-    assert_success
-    mcp_assert_tool_result "${output}" 1 false "tool output"
-    assert [ -e "${tool_marker}" ]
 }
 
 @test "process_request: with a hook defined, a tool's background child stays in the call's process group and is killed when the call ends" {
@@ -882,5 +852,110 @@ BODY
     # Only the server process is left: the wrapper the hook ran in and the
     # sentinel beside it are gone with the call's group.
     run mcp_wait_for_server_procs "${server}" exact 1 5
+    assert_success
+}
+
+# --- a tool's background child when the server ends the call ---
+# Each tool leaves one background child and blocks on a second, so the call is
+# still in flight when the server ends it. The child dies only as a member of
+# the call's process group; had the hook's option restore turned job control on
+# in the wrapper, the child would start in a group of its own.
+
+@test "with a hook defined, a cancellation kills a tool's background child" {
+    export TOOL_CHILD_PID_FILE="${BATS_TEST_TMPDIR}/child.pid"
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+mcp_before_tool_call() {
+    return 0
+}
+tool_x() {
+    local child blocker
+    sleep 30 &
+    child=$!
+    sleep 30 &
+    blocker=$!
+    printf '%s %s\n' "${child}" "${blocker}" > "${TOOL_CHILD_PID_FILE}"
+    wait "${blocker}"
+}
+BODY
+    mcp_start_server "${server}"
+    mcp_send "$(mcp_tools_call_request 51 x '{}')"
+    run mcp_wait_for_file "${TOOL_CHILD_PID_FILE}" 5
+    assert_success
+    local child_pid blocker_pid
+    read -r child_pid blocker_pid < "${TOOL_CHILD_PID_FILE}"
+
+    mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":51}}'
+
+    run mcp_wait_for_exit "${child_pid}" 5
+    kill "${child_pid}" "${blocker_pid}" 2>/dev/null || true
+    assert_success
+}
+
+@test "with a hook defined, a SIGTERM to the server's process group kills a tool's background child" {
+    export TOOL_CHILD_PID_FILE="${BATS_TEST_TMPDIR}/child.pid"
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+mcp_before_tool_call() {
+    return 0
+}
+tool_x() {
+    local child blocker
+    sleep 30 &
+    child=$!
+    sleep 30 &
+    blocker=$!
+    printf '%s %s\n' "${child}" "${blocker}" > "${TOOL_CHILD_PID_FILE}"
+    wait "${blocker}"
+}
+BODY
+    mcp_start_server_isolated "${server}"
+    mcp_send "$(mcp_tools_call_request 52 x '{}')"
+    run mcp_wait_for_file "${TOOL_CHILD_PID_FILE}" 5
+    assert_success
+    local child_pid blocker_pid
+    read -r child_pid blocker_pid < "${TOOL_CHILD_PID_FILE}"
+
+    # The call's group is not the server's. The child is gone after the
+    # SIGTERM only while it stays in the call's process group (the property
+    # `set +m` provides); the assertion does not tell which step of the
+    # shutdown killed that group.
+    kill -TERM -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
+
+    run mcp_wait_for_exit "${child_pid}" 5
+    kill "${child_pid}" "${blocker_pid}" 2>/dev/null || true
+    assert_success
+}
+
+@test "with a hook defined, the lifeline sentinel kills a tool's background child after a SIGKILL to the server's process group" {
+    export TOOL_CHILD_PID_FILE="${BATS_TEST_TMPDIR}/child.pid"
+    local server="${BATS_TEST_TMPDIR}/server.sh"
+    write_server "${server}" <<'BODY'
+mcp_before_tool_call() {
+    return 0
+}
+tool_x() {
+    local child blocker
+    sleep 30 &
+    child=$!
+    sleep 30 &
+    blocker=$!
+    printf '%s %s\n' "${child}" "${blocker}" > "${TOOL_CHILD_PID_FILE}"
+    wait "${blocker}"
+}
+BODY
+    mcp_start_server_isolated "${server}"
+    mcp_send "$(mcp_tools_call_request 53 x '{}')"
+    run mcp_wait_for_file "${TOOL_CHILD_PID_FILE}" 5
+    assert_success
+    local child_pid blocker_pid
+    read -r child_pid blocker_pid < "${TOOL_CHILD_PID_FILE}"
+
+    # Every server process dies with no trap run, so the sentinel in the call's
+    # group is the only thing left that can kill the child.
+    kill -KILL -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
+
+    run mcp_wait_for_exit "${child_pid}" 5
+    kill "${child_pid}" "${blocker_pid}" 2>/dev/null || true
     assert_success
 }

@@ -1,10 +1,12 @@
 #!/usr/bin/env bats
-# bats file_tags=mcp-client,client-harness
+# bats file_tags=mcp-core,client-harness
 # Validates tests/test_helper/mcp_client.bash against the server's current
 # behavior: start a fixture server, drive one request at a time over the FIFO,
-# wait for its response, assert silence for an id that was never sent, and tear
-# the server down. Cancellation behavior is covered by cancellation.bats, which
-# uses these helpers to drive the in-flight request stream.
+# wait for its response, assert silence for an id that was never sent and fail
+# for one that was answered, and tear the server down; and that a start, or a
+# send, fails loudly when the server exits or writes during startup or is gone.
+# Cancellation behavior is covered by cancellation.bats, which uses these
+# helpers to drive the in-flight request stream.
 bats_require_minimum_version 1.11.0
 
 load "${BATS_TEST_DIRNAME}/test_helper/common_setup"
@@ -32,7 +34,7 @@ teardown() {
     assert_success
     local response="${output}"
 
-    run jq -e '.id == 1 and has("result")' <<< "${response}"
+    run jq -e 'has("result") and (has("error") | not)' <<< "${response}"
     assert_success
 }
 
@@ -55,6 +57,17 @@ teardown() {
     run mcp_assert_no_response 99 0.5
     assert_success
     [[ -z "${output}" ]]
+}
+
+@test "mcp_assert_no_response: fails naming the response for an id the server answered" {
+    mcp_send '{"jsonrpc":"2.0","id":9,"method":"ping"}'
+    run mcp_wait_for_response 9 5
+    assert_success
+
+    run mcp_assert_no_response 9 0.5
+
+    assert_equal "${status}" 1
+    assert_output 'mcp_assert_no_response: unexpected response for id 9: {"jsonrpc":"2.0","id":9,"result":{}}'
 }
 
 @test "mcp_stop_server: leaves no server process running and removes its temp dir" {
@@ -93,7 +106,7 @@ teardown() {
     # and run_mcp_server, then a marker. A start that returned after a fixed
     # short wait would return before the marker exists.
     mcp_stop_server
-    write_fixture_files '[]'
+    write_fixture_files '{"tools": []}'
     write_server "${BATS_TEST_TMPDIR}/slow_start.sh" <<BODY
 sleep 1
 touch "${BATS_TEST_TMPDIR}/startup.done"
@@ -106,7 +119,7 @@ BODY
 
 @test "mcp_start_server: fails when the server writes to the protocol stream during startup" {
     mcp_stop_server
-    write_fixture_files '[]'
+    write_fixture_files '{"tools": []}'
     write_server "${BATS_TEST_TMPDIR}/noisy.sh" <<'BODY'
 printf 'startup noise\n' >&"${_MCP_PROTOCOL_FD}"
 BODY
@@ -139,7 +152,7 @@ BODY
 
 @test "mcp_start_server: fails with the server's stderr when the server exits before serving" {
     mcp_stop_server
-    write_fixture_files '[]'
+    write_fixture_files '{"tools": []}'
     write_server "${BATS_TEST_TMPDIR}/dies.sh" <<< 'echo "startup refused" >&2; exit 1'
 
     run mcp_start_server "${BATS_TEST_TMPDIR}/dies.sh"

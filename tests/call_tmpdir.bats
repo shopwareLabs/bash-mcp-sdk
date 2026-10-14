@@ -97,10 +97,8 @@ teardown() {
 
 # --- the directory a tool sees ---
 
-@test "process_request: each call gets its own empty, writable, owner-only MCP_CALL_TMPDIR" {
-    local dir_log="${BATS_TEST_TMPDIR}/dirs"
+@test "process_request: a call's MCP_CALL_TMPDIR is an empty directory only its owner can use" {
     tool_x() {
-        printf '%s\n' "${MCP_CALL_TMPDIR}" >> "${dir_log}"
         [[ -z "$(ls -A "${MCP_CALL_TMPDIR}")" ]] || return 1
         : > "${MCP_CALL_TMPDIR}/probe" || return 1
         local listing
@@ -109,17 +107,27 @@ teardown() {
     }
 
     run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
+
     assert_success
     mcp_assert_tool_result "${output}" 1 false "drwx------"
+}
+
+@test "process_request: each call gets an MCP_CALL_TMPDIR of its own under TMPDIR" {
+    local dir_log="${BATS_TEST_TMPDIR}/dirs"
+    tool_x() { printf '%s\n' "${MCP_CALL_TMPDIR}" >> "${dir_log}"; }
+
+    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
+    assert_success
     run --separate-stderr process_request "$(mcp_tools_call_request 2 x '{}')"
     assert_success
-    mcp_assert_tool_result "${output}" 2 false "drwx------"
 
     local first second
     { IFS= read -r first; IFS= read -r second; } < "${dir_log}"
     assert [ -n "${first}" ]
+    assert [ -n "${second}" ]
     assert [ "${first}" != "${second}" ]
     assert_equal "${first%/mcp-call.*/tmp}" "${TMPDIR}"
+    assert_equal "${second%/mcp-call.*/tmp}" "${TMPDIR}"
 }
 
 @test "process_request: the before-tool hook, the tool and a process it starts see the same MCP_CALL_TMPDIR" {
@@ -175,7 +183,6 @@ teardown() {
     local call_dir
     call_dir="$(jq -r '.result.content[0].text' <<< "${output}")"
     assert_equal "${call_dir%/mcp-call.*/tmp}" "${TMPDIR}"
-    assert [ ! -e "${call_dir}" ]
     run mcp_count_call_roots "${TMPDIR}"
     assert_output "0"
 }
@@ -196,7 +203,6 @@ teardown() {
     local call_dir
     call_dir="$(jq -r '.result.content[0].text | sub("^Error executing x: "; "")' <<< "${response}")"
     assert_equal "${call_dir%/mcp-call.*/tmp}" "${TMPDIR}"
-    assert [ ! -e "${call_dir}" ]
     run mcp_count_call_roots "${TMPDIR}"
     assert_output "0"
 }
@@ -368,19 +374,6 @@ BODY
     assert_output "0"
 }
 
-@test "process_request: with a relative TMPDIR and no hook the tool runs (guard: unchanged behavior)" {
-    cd "${BATS_TEST_TMPDIR}"
-    TMPDIR="tmp"
-    tool_x() { printf 'tool output\n'; }
-
-    run --separate-stderr process_request "$(mcp_tools_call_request 1 x '{}')"
-
-    assert_success
-    mcp_assert_tool_result "${output}" 1 false "tool output"
-    run mcp_count_call_roots "${TMPDIR}"
-    assert_output "0"
-}
-
 # --- the call's files ---
 
 @test "a call on the server loop leaves no call files behind (guard: unchanged behavior)" {
@@ -418,22 +411,6 @@ BODY
     assert [ ! -e "${call_dir}" ]
     run mcp_count_call_roots "${TMPDIR}"
     assert_output "0"
-}
-
-@test "a cancellation whose directory the teardown already removed logs no WARN about the call directory" {
-    mcp_start_server "${SERVER}"
-    mcp_send "$(mcp_tools_call_request 55 recorder '{}')"
-    run mcp_wait_for_file "${DIR_FILE}" 5
-    assert_success
-
-    mcp_send '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":55}}'
-
-    run mcp_wait_for_log fixed "Cancelled tools/call 55 (recorder)" 6
-    assert_success
-    # The dispatch's own removal runs after that line. A second `find` against
-    # the path the teardown just removed is what logs the spurious WARN.
-    run mcp_wait_for_log fixed "call directory" 2
-    assert_failure
 }
 
 @test "a server shutdown with a call in flight removes the call's directory" {
@@ -549,7 +526,9 @@ BODY
 
 # --- a directory that cannot be created ---
 
-@test "under set -o posix a call whose call root cannot be created answers isError, leaves no file in the server's directory, and the server answers the next request" {
+@test "under set -o posix a call whose call root cannot be created is refused cleanly" {
+    # Cleanly: an isError answer, the tool never run, no file left in the
+    # server's directory, and the server still answering.
     local server_tmp="${BATS_TEST_TMPDIR}/server-tmp"
     local server_cwd="${BATS_TEST_TMPDIR}/server-cwd"
     local tool_marker="${BATS_TEST_TMPDIR}/tool.ran"

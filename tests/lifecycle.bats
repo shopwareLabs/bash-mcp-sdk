@@ -5,6 +5,11 @@
 # trap can catch — no tool process may outlive it. A signal that arrives while a
 # teardown is already running belongs to that pass: it may not cut the teardown
 # short, and the shell still dies by the signal.
+# Also pinned here: that the harness's process count sees only the server the
+# test started, which every exact count below relies on; and, called in-process,
+# how a teardown treats the in-flight record it reads: a tombstone releases the
+# call's files without signalling, and a record naming a path outside a call
+# root removes nothing and hands its cancel hook no MCP_CALL_TMPDIR.
 # The server is tests/fixtures/cancellation_server.sh driven through
 # tests/test_helper/mcp_client.bash; mcp_start_server_isolated is the harness
 # helper that puts the server in a process group of its own so a test can signal
@@ -18,21 +23,6 @@ load "${BATS_TEST_DIRNAME}/test_helper/write_server"
 
 CANCELLATION_SERVER="${REPO_ROOT}/tests/fixtures/cancellation_server.sh"
 
-# Wait up to <secs> (default 5) for <file> to carry a line equal to <text>.
-_mcp_wait_for_line() {
-    local file="$1"
-    local text="$2"
-    local limit="${3:-5}"
-    local deadline=$(( SECONDS + limit ))
-    while (( SECONDS < deadline )); do
-        if [[ -f "${file}" ]] && grep -qx -- "${text}" "${file}"; then
-            return 0
-        fi
-        sleep 0.05
-    done
-    return 1
-}
-
 setup() {
     # The fixture exports its own config and tools list over these two paths.
     mcp_test_env "${REPO_ROOT}/tests/fixtures/cancellation_config.json" \
@@ -44,7 +34,13 @@ setup() {
 
 teardown() {
     mcp_stop_server
-    unset SLOW_MARKER_FILE CHILD_PID_FILE GRANDCHILD_PID_FILE \
+    # A decoy group a test started is killed here, so a failed assertion before
+    # the end of the body cannot leave its sleeper running.
+    if [[ -n "${DECOY_PID:-}" ]]; then
+        kill -KILL -- "-${DECOY_PID}" 2>/dev/null || true
+        wait "${DECOY_PID}" 2>/dev/null || true
+    fi
+    unset DECOY_PID SLOW_MARKER_FILE CHILD_PID_FILE GRANDCHILD_PID_FILE \
         SLOW_SECS TOOL_SLEEP_PID_FILE MCP_SERVER_PGID TMPDIR CANCEL_HOOK_FILE _MCP_INFLIGHT_FILE \
         MCP_SERVER_INSTANCE
 }
@@ -60,19 +56,19 @@ teardown() {
     # command line, and an instance marker of its own. The trailing `true` keeps
     # the shell from exec'ing its only command, which would replace the argv the
     # scan has to see.
+    local foreign="foreign-$$-${RANDOM}"
     set -m
-    bash -c 'sleep 30; true' "${CANCELLATION_SERVER}" --mcp-test-instance=foreign &
-    local decoy_pid=$!
+    bash -c 'sleep 30; true' "${CANCELLATION_SERVER}" "--mcp-test-instance=${foreign}" &
+    DECOY_PID=$!
     set +m
-    sleep 0.2
+
+    # The same scan, scoped to the decoy's marker, finds it: the decoy is past
+    # its exec and visible by path before the real count runs.
+    MCP_SERVER_INSTANCE="${foreign}" run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 1 3
+    assert_success
 
     run mcp_count_server_procs "${CANCELLATION_SERVER}"
     assert_output "1"
-
-    run kill -0 -- "-${decoy_pid}"
-    assert_success
-    kill -KILL -- "-${decoy_pid}" 2>/dev/null || true
-    wait "${decoy_pid}" 2>/dev/null || true
 }
 
 @test "SIGKILL to the server's process group leaves no tool process behind" {
@@ -172,9 +168,9 @@ BODY
 
     kill -TERM -- "-${MCP_SERVER_PGID}" 2>/dev/null || true
 
-    # The server and the dispatch subshell die on the signal while the tool is
-    # still running, so what stops the tool is the shutdown teardown reaching
-    # the group the in-flight file names.
+    # The tool runs in a group of its own, which the shutdown teardown and the
+    # lifeline sentinel can each kill; the assertions show only that the server,
+    # the tool's child and every server process are gone, not which one did it.
     run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
     run mcp_wait_for_exit "${child_pid}" 5
@@ -183,36 +179,43 @@ BODY
     assert_success
 }
 
-@test "SIGTERM to the server pid alone defers until the call finishes, then cleans up" {
+@test "SIGTERM to the server pid alone defers until the call finishes, then cleans up the child the tool left running" {
     export SLOW_SECS=2
-    mcp_start_server_isolated "${CANCELLATION_SERVER}"
-    mcp_send '{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"spawns_tree","arguments":{}}}'
+    write_fixture_files '{"tools": [{"name": "leaves_child", "inputSchema": {"type": "object"}}]}'
+    local server="${BATS_TEST_TMPDIR}/leaves_child_server.sh"
+    # The tool returns while its background child still sleeps, so the child is
+    # alive after the call and only a cleanup can stop it. The marker is written
+    # last, so it exists only once the body ran to its end.
+    write_server "${server}" <<'BODY'
+tool_leaves_child() {
+    sleep 30 &
+    printf '%s\n' "$!" > "${CHILD_PID_FILE}"
+    sleep "${SLOW_SECS}"
+    printf 'done\n' > "${SLOW_MARKER_FILE}"
+}
+BODY
+    mcp_start_server_isolated "${server}"
+    mcp_send '{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"leaves_child","arguments":{}}}'
 
     run mcp_wait_for_file "${CHILD_PID_FILE}" 5
     assert_success
-    run mcp_wait_for_file "${GRANDCHILD_PID_FILE}" 5
-    assert_success
-    local child_pid grandchild_pid
+    local child_pid
     child_pid="$(<"${CHILD_PID_FILE}")"
-    grandchild_pid="$(<"${GRANDCHILD_PID_FILE}")"
 
     kill -TERM "${MCP_SERVER_PID}" 2>/dev/null || true
 
     # The signal reaches the server's pid alone, mid-dispatch, and bash runs a
-    # trap only between foreground commands — so the call runs to completion
-    # first. The marker's second line is that completion: the tool writes it
-    # after the child it spawned has been waited for.
-    run _mcp_wait_for_line "${SLOW_MARKER_FILE}" "done" $(( SLOW_SECS + 3 ))
+    # trap only between foreground commands, so the call runs to completion
+    # first; a teardown that TERMed the tool group instead would cut the body
+    # short of the marker.
+    run mcp_wait_for_file "${SLOW_MARKER_FILE}" $(( SLOW_SECS + 3 ))
     assert_success
 
     run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
-    # The deferral must not leave the tool group alive once the server is gone.
     run mcp_wait_for_exit "${child_pid}" 5
     assert_success
-    run mcp_wait_for_exit "${grandchild_pid}" 5
-    assert_success
-    run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 0 5
+    run mcp_wait_for_server_procs "${server}" exact 0 5
     assert_success
 }
 
@@ -352,8 +355,8 @@ BODY
 
     run mcp_wait_for_exit "${MCP_SERVER_PID}" 5
     assert_success
-    # The pass ran to its end rather than ending early: the tool group was killed
-    # and the call's output file removed.
+    # The pass ran to its end rather than ending early: the call root, which it
+    # removes after stopping the tool group, is gone.
     run mcp_wait_for_call_roots "${TMPDIR}" 0 5
     assert_success
     run mcp_wait_for_server_procs "${CANCELLATION_SERVER}" exact 0 5
@@ -367,18 +370,6 @@ BODY
     local status=0
     wait "${MCP_SERVER_PID}" || status=$?
     assert_equal "${status}" 143
-}
-
-@test "mcp_start_server fails loudly when the server exits immediately" {
-    # The harness's contract: a server that died at startup has not started, so
-    # starting one is an error at the start rather than a mystery on the first
-    # write. A binary that exits before the check is exactly that server. Its
-    # path is resolved rather than hardcoded: `true` lives under /usr/bin on
-    # macOS and /bin on Alpine.
-    run mcp_start_server "$(type -P true)"
-
-    assert_failure
-    assert_output --partial 'exited during startup'
 }
 
 @test "a tombstone in-flight record releases the call's files without signalling" {
@@ -403,14 +394,6 @@ BODY
     printf '%s %s %s\n' '-' 'slow' "${output_file}" > "${record_file}"
     export _MCP_INFLIGHT_FILE="${record_file}"
 
-    # A decoy in a process group of its own, live across the teardown. The
-    # record names no group, so nothing about this one may be signalled.
-    set -m
-    sleep 30 &
-    local decoy_pid
-    decoy_pid=$!
-    set +m
-
     # A cancel hook for the tool the record names. The tombstone is what says
     # the call was already stopped, so the hook must not run — and without it a
     # teardown that entered the signalling branch and one that did not are
@@ -419,6 +402,13 @@ BODY
     tool_slow_cancel() {
         printf 'ran\n' > "${hook_file}"
     }
+    # `kill -0 -- --` fails on its own, so the tombstone alone never reaches the
+    # hook; the spy is what shows the teardown does not probe `-` as a group id.
+    local kill_log="${BATS_TEST_TMPDIR}/kill.log"
+    kill() {
+        printf '%s\n' "$*" >> "${kill_log}"
+        builtin kill "$@"
+    }
 
     run _server_teardown
 
@@ -426,10 +416,7 @@ BODY
     assert [ ! -e "${call_root}" ]
     assert [ ! -e "${record_file}" ]
     assert [ ! -e "${hook_file}" ]
-    assert kill -0 -- "-${decoy_pid}"
-
-    kill -KILL -- "-${decoy_pid}" 2>/dev/null || true
-    wait "${decoy_pid}" 2>/dev/null || true
+    assert [ ! -e "${kill_log}" ]
 }
 
 @test "an in-flight record naming a path outside a call root is refused, and nothing is removed" {
@@ -481,10 +468,9 @@ BODY
     # first TERM.
     set -m
     sleep 30 &
-    local decoy_pid
-    decoy_pid=$!
+    DECOY_PID=$!
     set +m
-    printf '%s %s %s\n' "${decoy_pid}" 'slow' "${victim_dir}/output" > "${record_file}"
+    printf '%s %s %s\n' "${DECOY_PID}" 'slow' "${victim_dir}/output" > "${record_file}"
     export _MCP_INFLIGHT_FILE="${record_file}"
 
     hook_file="${BATS_TEST_TMPDIR}/cancel-hook.log"
@@ -503,7 +489,6 @@ BODY
     assert [ -e "${keep_file}" ]
     run grep -qF "refusing to derive a call root from ${victim_dir}/output: not a call root" "${MCP_LOG_FILE}"
     assert_success
-    run mcp_wait_for_exit "${decoy_pid}" 3
+    run mcp_wait_for_exit "${DECOY_PID}" 3
     assert_success
-    wait "${decoy_pid}" 2>/dev/null || true
 }
