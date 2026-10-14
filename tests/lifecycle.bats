@@ -127,10 +127,8 @@ teardown() {
 }
 
 @test "SIGKILL to the server pid leaves no tool process behind when the server runs in posix mode" {
-    # Posix mode switches process substitution off on Bash 4.1 to 5.0. The
-    # sentinel turns posix mode off for itself; without that, it would find no
-    # group id there and kill nothing. `set -o posix` goes after the `source`
-    # line, which Bash 4.1 to 5.0 cannot parse in posix mode.
+    # A server in posix mode still gets its tool group killed when the server
+    # is SIGKILLed.
     export TOOL_SLEEP_PID_FILE="${BATS_TEST_TMPDIR}/sleep.pid"
     write_fixture_files '{"tools": [{"name": "hold", "inputSchema": {"type": "object"}}]}'
     local server="${BATS_TEST_TMPDIR}/posix_server.sh"

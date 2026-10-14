@@ -124,9 +124,6 @@ _source_sdk() {
 }
 
 @test "under inherit_errexit a tool's 1.1 MB output comes back byte-for-byte, then a ping is answered" {
-    if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
-        skip "inherit_errexit needs bash 4.4; this is ${BASH_VERSION}"
-    fi
     _start_server 'shopt -s inherit_errexit'
     _assert_call_text_then_ping big_output false "${PAYLOAD_FILE}"
 }

@@ -26,11 +26,10 @@
 #   - the server's errtrace and ERR trap apply in the tool as without a hook,
 #     and with errtrace on an ERR trap the hook installs reaches the tool;
 #   - a hook that ends with a status above 128 — killed by a signal, or
-#     stopped by errexit at a command that failed with such a status, where
-#     bash 4.1 to 4.3 end the hook with status 1 instead — stops the call
-#     with an isError result naming the status and the signal it may stand
-#     for, followed by the hook's output, and a wrapper killed while no hook
-#     is defined is answered as the tool's failure, never as the hook's;
+#     stopped by errexit at a command that failed with such a status — stops
+#     the call with an isError result naming the status and the signal it may
+#     stand for, followed by the hook's output, and a wrapper killed while no
+#     hook is defined is answered as the tool's failure, never as the hook's;
 #   - a call that is not dispatched — an undeclared tool, arguments that fail
 #     validation — does not run the hook, and neither does an executable on
 #     PATH of that name when no function is defined;
@@ -406,9 +405,6 @@ BODY
 }
 
 @test "a hook whose errexit stops it with a status above 128 is not reported as killed by a signal alone" {
-    if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
-        skip "bash ${BASH_VERSION} ends a shell errexit stops with status 1, not the failed command's status"
-    fi
     # The hook ends with the status a SIGPIPE death would give.
     export TOOL_MARKER="${BATS_TEST_TMPDIR}/tool.ran"
     local server="${BATS_TEST_TMPDIR}/server.sh"
@@ -524,9 +520,6 @@ BODY
 }
 
 @test "a hook that runs set +o posix leaves inherit_errexit off and posix on as the tool had them" {
-    if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
-        skip "bash ${BASH_VERSION} has no inherit_errexit option"
-    fi
     local server="${BATS_TEST_TMPDIR}/server.sh"
     write_server "${server}" <<'BODY'
 set -o posix
@@ -555,9 +548,6 @@ BODY
 }
 
 @test "a hook that runs set -o posix leaves errtrace and functrace off when extdebug is on (guard: unchanged behavior)" {
-    if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
-        skip "bash ${BASH_VERSION}: extdebug does not change errtrace or functrace before 4.4"
-    fi
     local server="${BATS_TEST_TMPDIR}/server.sh"
     write_server "${server}" <<'BODY'
 shopt -s extdebug
