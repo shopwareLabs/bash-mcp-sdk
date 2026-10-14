@@ -3,7 +3,7 @@
 - `project.stacks` =
   | Stack | Where | Toolchain |
   |---|---|---|
-  | bash | `lib/mcpserver_core.sh`, `tests/**/*.bats`, `tests/test_helper/*.bash`, `scripts/`, `.github/scripts/` | bash 4.1+ for the SDK and its tests, enforced by the pre-flight guard when the file is sourced; bash 3.2+ for `.github/scripts/` and for the guard block itself (both run on stock macOS); `jq` 1.7+; ShellCheck v0.11.0 pinned in CI |
+  | bash | `lib/mcpserver_core.sh`, `tests/**/*.bats`, `tests/test_helper/*.bash`, `scripts/`, `.github/scripts/` | bash 5.1+ for the SDK and its tests, enforced by the pre-flight guard when the file is sourced; bash 3.2+ for `.github/scripts/` and for the guard block itself (both run on stock macOS); `jq` 1.7+; ShellCheck v0.11.0 pinned in CI |
 
   No other stack is in play. The whole product is one bash file; everything else in the tree tests or ships it.
 - `tests.frameworks` =

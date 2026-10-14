@@ -3,7 +3,7 @@
 # bash-mcp-sdk
 
 [![CI](https://img.shields.io/github/actions/workflow/status/shopwareLabs/bash-mcp-sdk/ci.yml?branch=main&logo=github&label=CI)](https://github.com/shopwareLabs/bash-mcp-sdk/actions/workflows/ci.yml)
-[![bash 4.1+](https://img.shields.io/badge/bash-4.1%2B-4EAA25?logo=gnubash&logoColor=white)](#-requirements)
+[![bash 5.1+](https://img.shields.io/badge/bash-5.1%2B-4EAA25?logo=gnubash&logoColor=white)](#-requirements)
 [![jq 1.7+](https://img.shields.io/badge/jq-1.7%2B-0E5E8E)](#-requirements)
 [![License: MIT](https://img.shields.io/github/license/shopwareLabs/bash-mcp-sdk)](./LICENSE)
 
@@ -13,12 +13,12 @@ One file, `lib/mcpserver_core.sh`. It sources nothing and needs `jq`, plus `ps` 
 
 ## 📌 Requirements
 
-- Bash 4.1+ — the file allocates file descriptors with `{var}` redirection, which arrived in 4.1.
+- Bash 5.1+ — sourcing the file under an older Bash is refused.
 - `jq` 1.7+ — below that floor, jq parses every number to a double. The validator's `integer` check then cannot see a fraction the double rounded away.
 - `ps` and `mkfifo` — the tool lifecycle. `run_mcp_server` creates the lifeline with `mkfifo` as it starts, and `ps` is reached only once a tool runs. BusyBox ships both, so an Alpine consumer needs no procps (why the code reads a full `ps` listing is in `docs/architecture.md` §Cancellation).
 - `/dev/stdin` — the SDK reads a tool result's text through it. On Linux it is a link into `/proc`.
 
-Sourcing the file checks the first two floors. A Bash below 4.1, a `jq` that is missing or cannot run, or a `jq` below 1.7 is refused on stderr. The refusal names the requirement and, where there is one, the version found. It adds remediation for the platform: its package manager's command where one can be determined, and a generic line otherwise.
+Sourcing the file checks the first two floors. A Bash below 5.1, a `jq` that is missing or cannot run, or a `jq` below 1.7 is refused on stderr. The refusal names the requirement and, where there is one, the version found. It adds remediation for the platform: its package manager's command where one can be determined, and a generic line otherwise.
 
 > [!NOTE]
 > macOS ships Bash 3.2. Install a current Bash (`brew install bash`) or run servers under one. An MCP host launched from the desktop does not read your shell profile. The newer Bash therefore has to sit on the PATH that host starts the server with.
@@ -142,12 +142,12 @@ Or run it in containers, which need Docker:
 ```bash
 ./scripts/test-linux.sh            # ShellCheck, then Debian and Alpine
 ./scripts/test-linux.sh debian     # one distro: no ShellCheck
-./scripts/test-linux.sh bash-4.1   # Alpine on the official bash:4.1 image
+./scripts/test-linux.sh bash-5.1   # Alpine on the official bash:5.1 image
 ```
 
 Set `BASE_IMAGE_DEBIAN` or `BASE_IMAGE_ALPINE` to override that build's base image. Set `JQ_VERSION` to install that upstream static jq release instead of the distro package. Set `BATS_TEST_TIMEOUT` to change the per-test timeout in seconds (default 90).
 
-Debian is the glibc/GNU run. Alpine adds only Bash and jq to musl/busybox, so a suite that leans on a tool the dev machine happens to carry fails there. The `bash-<major>.<minor>` legs run the same suite on the official Bash images CI uses, 4.1 to 5.1 and 5.3, and fail when the image's Bash is not the named one. Debian and Alpine run their distro Bash, 5.2 at the default base images.
+Debian is the glibc/GNU run. Alpine adds only Bash and jq to musl/busybox, so a suite that leans on a tool the dev machine happens to carry fails there. The `bash-<major>.<minor>` legs run the same suite on the official Bash images CI uses, 5.1 and 5.3, and fail when the image's Bash is not the named one. Debian and Alpine run their distro Bash, 5.2 at the default base images.
 
 Every leg gates, in bare and named runs alike.
 

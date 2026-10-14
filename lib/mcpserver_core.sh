@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # MCP Server Core - JSON-RPC 2.0 Protocol Handler
 # Based on Model Context Protocol specification
-# Requires: bash 4.1+, jq 1.7+
+# Requires: bash 5.1+, jq 1.7+
 
 # Pre-flight dependency guards for the two floors the header line declares.
 # This block alone uses no construct newer than bash 3.2, sits above the file's
@@ -19,7 +19,7 @@ _mcp_install_hint() {
 
     local floor="${dep}"
     case "${dep}" in
-        bash) floor="bash 4.1 or newer" ;;
+        bash) floor="bash 5.1 or newer" ;;
         jq) floor="jq 1.7 or newer" ;;
     esac
 
@@ -73,7 +73,7 @@ _mcp_install_hint() {
     return 0
 }
 
-# Whether bash <major>.<minor> is at or above the 4.1 floor. Takes the version
+# Whether bash <major>.<minor> is at or above the 5.1 floor. Takes the version
 # as arguments so a suite can drive it from a table. AGENTS.md §Pre-flight
 # guards. A non-numeric or empty component reads as below the floor.
 _mcp_bash_meets_floor() {
@@ -90,10 +90,10 @@ _mcp_bash_meets_floor() {
     # and agree on every value that reaches them here, but ShellCheck's SC2309
     # flags a built-up operand handed to `[[ ]]`'s numeric operators, and the
     # arithmetic form states the intent without needing a directive.
-    if (( 10#${major} > 4 )); then
+    if (( 10#${major} > 5 )); then
         return 0
     fi
-    if (( 10#${major} == 4 && 10#${minor} >= 1 )); then
+    if (( 10#${major} == 5 && 10#${minor} >= 1 )); then
         return 0
     fi
     return 1
@@ -152,13 +152,14 @@ _mcp_jq_meets_floor() {
     return 1
 }
 
-# bash floor. Below 4.1 the file still parses, so there is no early error to go
-# on: without this guard, sourcing it dies on the `exec {_MCP_PROTOCOL_FD}>&1`
-# redirection with `exec: {_MCP_PROTOCOL_FD}: not found` (probed on bash 3.2),
-# which an MCP host reports as nothing more than a server that failed to start.
+# bash floor. Below the floor the file still parses, so there is no early error
+# to go on: without this guard, sourcing it on bash 3.2 dies on the
+# `exec {_MCP_PROTOCOL_FD}>&1` redirection with
+# `exec: {_MCP_PROTOCOL_FD}: not found` (probed), which an MCP host reports as
+# nothing more than a server that failed to start.
 if [[ -z "${BASH_VERSINFO[0]:-}" ]] \
     || ! _mcp_bash_meets_floor "${BASH_VERSINFO[0]:-}" "${BASH_VERSINFO[1]:-}"; then
-    printf '%s\n' "bash-mcp-sdk: bash 4.1 or newer is required; this shell reports ${BASH_VERSION:-unknown}." >&2
+    printf '%s\n' "bash-mcp-sdk: bash 5.1 or newer is required; this shell reports ${BASH_VERSION:-unknown}." >&2
     _mcp_install_hint bash >&2
     # `return` when this file is sourced, `exit` when it is executed; the
     # complaint `return` raises outside a function is suppressed because it is
@@ -2061,6 +2062,12 @@ _mcp_teardown_on_signal() {
     _server_teardown
     trap - "$signal"
     kill -s "$signal" "$BASHPID"
+    # On Bash 5.1, when an EXIT trap was set before the signal trap, `trap -`
+    # restores a handler bash installed rather than the default, so the
+    # self-kill is only recorded. Without a command after it, bash blocks in
+    # `read` again before acting on it (verified on 5.1.4, 5.1.8 and 5.1.16;
+    # 5.2 and later act on it at once).
+    :
 }
 
 run_mcp_server() {
