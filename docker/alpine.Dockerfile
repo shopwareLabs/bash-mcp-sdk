@@ -5,9 +5,11 @@ FROM ${BASE_IMAGE}
 
 ARG JQ_VERSION=""
 
-# One layer: install bash, resolve jq through busybox wget when JQ_VERSION is set.
+# One layer: install bash unless the base carries one (the official bash:<ver> images
+# keep theirs in /usr/local/bin; adding Alpine's would sit at /bin/bash beside it),
+# resolve jq through busybox wget when JQ_VERSION is set.
 RUN set -eux; \
-    apk add --no-cache bash; \
+    command -v bash > /dev/null || apk add --no-cache bash; \
     if [ -n "${JQ_VERSION}" ]; then \
         case "${JQ_VERSION}" in \
             v*) printf '%s\n' "JQ_VERSION must omit the leading v (for example 1.7.1)" >&2; exit 1 ;; \

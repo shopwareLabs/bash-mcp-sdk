@@ -142,13 +142,14 @@ Or run it in containers, which need Docker:
 ```bash
 ./scripts/test-linux.sh            # ShellCheck, then Debian and Alpine
 ./scripts/test-linux.sh debian     # one distro: no ShellCheck
+./scripts/test-linux.sh bash-4.1   # Alpine on the official bash:4.1 image
 ```
 
-Set `BASE_IMAGE_DEBIAN` or `BASE_IMAGE_ALPINE` to override that build's base image. Set `JQ_VERSION` to install that upstream static jq release instead of the distro package.
+Set `BASE_IMAGE_DEBIAN` or `BASE_IMAGE_ALPINE` to override that build's base image. Set `JQ_VERSION` to install that upstream static jq release instead of the distro package. Set `BATS_TEST_TIMEOUT` to change the per-test timeout in seconds (default 90).
 
-Debian is the glibc/GNU run. Alpine adds only Bash and jq to musl/busybox, so a suite that leans on a tool the dev machine happens to carry fails there.
+Debian is the glibc/GNU run. Alpine adds only Bash and jq to musl/busybox, so a suite that leans on a tool the dev machine happens to carry fails there. The `bash-<major>.<minor>` legs run the same suite on the official Bash images CI uses, 4.1 to 5.1 and 5.3, and fail when the image's Bash is not the named one. Debian and Alpine run their distro Bash, 5.2 at the default base images.
 
-Both suites gate, in bare and named runs alike.
+Every leg gates, in bare and named runs alike.
 
 Lint with ShellCheck before pushing:
 

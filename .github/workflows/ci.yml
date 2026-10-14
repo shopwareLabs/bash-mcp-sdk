@@ -31,6 +31,7 @@ jobs:
   test:
     name: BATS (${{ matrix.distro }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
@@ -38,6 +39,21 @@ jobs:
       fail-fast: false
       matrix:
         distro: [debian, alpine]
+        include:
+          - distro: bash-4.1
+            base_image: bash:4.1
+          - distro: bash-4.2
+            base_image: bash:4.2
+          - distro: bash-4.3
+            base_image: bash:4.3
+          - distro: bash-4.4
+            base_image: bash:4.4
+          - distro: bash-5.0
+            base_image: bash:5.0
+          - distro: bash-5.1
+            base_image: bash:5.1
+          - distro: bash-5.3
+            base_image: bash:5.3
 
     steps:
       - name: Checkout repository
@@ -61,7 +77,8 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: docker
-          file: docker/${{ matrix.distro }}.Dockerfile
+          file: docker/${{ startsWith(matrix.distro, 'bash-') && 'alpine' || matrix.distro }}.Dockerfile
+          build-args: ${{ matrix.base_image && format('BASE_IMAGE={0}', matrix.base_image) || '' }}
           load: true
           push: false
           tags: bash-mcp-sdk-test:${{ matrix.distro }}
