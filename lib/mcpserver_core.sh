@@ -1276,13 +1276,16 @@ _await_tool_call() {
 # Args: $1 = tool name, $2 = the call's arguments JSON. The teardown that runs
 #       from a signal handler passes an empty string: it reads the tool's name
 #       and process group out of the in-flight file, which records no
-#       arguments. $3 = the call's output file, which names the call root; when
-#       it is empty, absent, or names no call root, the hook runs with
-#       MCP_CALL_TMPDIR unset rather than set to an empty path.
+#       arguments. $3 = the call root, which the caller has already checked;
+#       when it is empty, the hook runs with MCP_CALL_TMPDIR unset rather than
+#       set to an empty path. $4 = the output path the caller derived that
+#       root from: a non-empty path with an empty root is logged as refused,
+#       here, because only this function knows whether a hook is defined.
 _run_cancel_hook() {
     local tool_name="$1"
     local arguments="$2"
-    local output_file="${3:-}"
+    local call_root="${3:-}"
+    local output_file="${4:-}"
 
     # A function only, as in handle_tools_call: `type` would also run a
     # `tool_<name>_cancel` executable found on PATH.
@@ -1291,19 +1294,14 @@ _run_cancel_hook() {
         return 0
     fi
 
-    local call_root=""
     local call_tmpdir=""
-    if [[ -n "$output_file" ]]; then
-        if _mcp_call_root_of call_root "$output_file"; then
-            call_tmpdir="${call_root}/tmp"
-        else
-            log "WARN" "refusing to derive a call root from ${output_file}: not a call root; cancel hook ${hook} runs with MCP_CALL_TMPDIR unset"
-        fi
+    if [[ -n "$call_root" ]]; then
+        call_tmpdir="${call_root}/tmp"
+    elif [[ -n "$output_file" ]]; then
+        log "WARN" "refusing to derive a call root from ${output_file}: not a call root; cancel hook ${hook} runs with MCP_CALL_TMPDIR unset"
     fi
 
     local hook_pid
-    local waited=0
-    local hook_status=0
     local monitor_was_enabled=0
     if [[ -o monitor ]]; then
         monitor_was_enabled=1
@@ -1313,33 +1311,70 @@ _run_cancel_hook() {
     # into a removal under `/`, so with no directory to name it is unset, which
     # also drops a value inherited from the environment.
     # shellcheck disable=SC2031 # The hook's MCP_CALL_TMPDIR is set in this subshell alone, independent of any wrapper's.
-    ( if [[ -n "${_MCP_LIFELINE_FD:-}" ]]; then exec {_MCP_LIFELINE_FD}>&-; fi; if [[ -n "${_MCP_PROTOCOL_FD:-}" ]]; then exec {_MCP_PROTOCOL_FD}>&-; fi; set +e; if [[ -n "$call_tmpdir" ]]; then export MCP_CALL_TMPDIR="$call_tmpdir"; else unset MCP_CALL_TMPDIR; fi; "$hook" "$arguments" ) >/dev/null 2>&1 </dev/null &
+    ( _mcp_close_protocol_fds; set +e; if [[ -n "$call_tmpdir" ]]; then export MCP_CALL_TMPDIR="$call_tmpdir"; else unset MCP_CALL_TMPDIR; fi; "$hook" "$arguments" ) >/dev/null 2>&1 </dev/null &
     hook_pid=$!
     if [[ "$monitor_was_enabled" == "1" ]]; then
         set -m
     else
         set +m
     fi
-    while kill -0 "$hook_pid" 2>/dev/null \
+    _mcp_reap_with_grace "$hook_pid" "Cancel hook ${hook} for ${tool_name}" "exited"
+    return 0
+}
+
+# Wait out a background job that leads a process group of its own, bounded at
+# _MCP_CANCEL_GRACE_SECONDS: an overrun job's group is SIGKILLed, the job reaped
+# and the overrun logged, a
+# non-zero status is logged, and a job that finished in time has whatever it
+# left in its group cleared. The status is always 0, so the job cannot change
+# its caller's outcome.
+# The caller spawns the job itself: a function wrapped around the job's body
+# adds a frame, and with errtrace on the ERR trap fires once more at that frame
+# (probed on bash 5.3).
+# Args: $1 = the job's pid, which is the group id it leads,
+#       $2 = what the WARN lines call the job, $3 = the verb its non-zero
+#       status is logged with
+_mcp_reap_with_grace() {
+    local pid="$1"
+    local label="$2"
+    local status_verb="$3"
+    local waited=0
+    local status=0
+
+    while kill -0 "$pid" 2>/dev/null \
         && [[ $waited -lt $((_MCP_CANCEL_GRACE_SECONDS * 10)) ]]; do
         sleep 0.1
         waited=$((waited + 1))
     done
-    if kill -0 "$hook_pid" 2>/dev/null; then
-        kill -KILL -- "-$hook_pid" 2>/dev/null || true
-        wait "$hook_pid" || true
-        log "WARN" "Cancel hook ${hook} for ${tool_name} did not finish within ${_MCP_CANCEL_GRACE_SECONDS}s; killed"
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL -- "-$pid" 2>/dev/null || true
+        wait "$pid" || true
+        log "WARN" "${label} did not finish within ${_MCP_CANCEL_GRACE_SECONDS}s; killed"
     else
-        wait "$hook_pid" || hook_status=$?
-        if [[ $hook_status -ne 0 ]]; then
-            log "WARN" "Cancel hook ${hook} for ${tool_name} exited with status ${hook_status}"
+        wait "$pid" || status=$?
+        if [[ $status -ne 0 ]]; then
+            log "WARN" "${label} ${status_verb} with status ${status}"
         fi
-        # The hook leads a group of its own, which the in-flight record does not
-        # name, so no tombstone is written for it: the call's group is still
+        # The group is the job's own, not the call's the in-flight record
+        # names, so no tombstone is written for it: a call's group may still be
         # live here and the record has to keep naming it.
-        _kill_tool_group "$hook_pid" "" ""
+        _kill_tool_group "$pid" "" ""
     fi
     return 0
+}
+
+# Close the descriptors the server holds for its own use — the lifeline writer
+# and the protocol stream — and clear the variables naming them, so a later
+# close cannot hit a number the shell has since given to something else.
+_mcp_close_protocol_fds() {
+    if [[ -n "${_MCP_LIFELINE_FD:-}" ]]; then
+        exec {_MCP_LIFELINE_FD}>&-
+        _MCP_LIFELINE_FD=""
+    fi
+    if [[ -n "${_MCP_PROTOCOL_FD:-}" ]]; then
+        exec {_MCP_PROTOCOL_FD}>&-
+        _MCP_PROTOCOL_FD=""
+    fi
 }
 
 # Clear what is left of a tool's process group after its wrapper has been
@@ -1607,6 +1642,31 @@ _tool_group_has_live_member() {
     return 1
 }
 
+# TERM a tool's process group, give its live members other than the sentinel
+# _MCP_CANCEL_GRACE_SECONDS to exit, and SIGKILL the group if one outlasts the
+# grace. The caller checks the group is still there before calling, and reaps.
+# Args: $1 = group id, $2 = sentinel pid (empty when unknown), $3 = tool name
+_mcp_term_group_with_grace() {
+    local pgid="$1"
+    local sentinel_pid="$2"
+    local tool_name="$3"
+    local waited=0
+
+    # The wrapper leads its own process group, so the negative pid reaches the
+    # tool and everything it spawned.
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+    while _tool_group_has_live_member "$pgid" "$sentinel_pid" \
+        && [[ $waited -lt $((_MCP_CANCEL_GRACE_SECONDS * 10)) ]]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    if _tool_group_has_live_member "$pgid" "$sentinel_pid"; then
+        kill -KILL -- "-$pgid" 2>/dev/null || true
+        log "WARN" "Tool ${tool_name} ignored SIGTERM; process group killed"
+    fi
+    return 0
+}
+
 # Stop a cancelled tool call: run its optional cancel hook, terminate the
 # child's process group, and reap it. A hook or a child that ignores SIGTERM
 # gets _MCP_CANCEL_GRACE_SECONDS before being killed, so a wedged consumer tool
@@ -1622,30 +1682,20 @@ _teardown_tool_call() {
     local id="$4"
     local output_file="$5"
 
-    _run_cancel_hook "$tool_name" "$arguments" "$output_file"
-
     local call_root=""
+    _mcp_call_root_of call_root "$output_file" || true
+
+    _run_cancel_hook "$tool_name" "$arguments" "$call_root" "$output_file"
+
     local sentinel_pid=""
-    if _mcp_call_root_of call_root "$output_file"; then
+    if [[ -n "$call_root" ]]; then
         sentinel_pid="$(_sentinel_pid_for "${call_root}/sentinel")"
     else
         log "WARN" "refusing to derive a call root from ${output_file}: not a call root"
     fi
 
-    local alive_waited=0
     if kill -0 -- "-$pid" 2>/dev/null; then
-        # The child leads its own process group, so the negative pid reaches
-        # the tool and everything it spawned.
-        kill -TERM -- "-$pid" 2>/dev/null || true
-        while _tool_group_has_live_member "$pid" "$sentinel_pid" \
-            && [[ $alive_waited -lt $((_MCP_CANCEL_GRACE_SECONDS * 10)) ]]; do
-            sleep 0.1
-            alive_waited=$((alive_waited + 1))
-        done
-        if _tool_group_has_live_member "$pid" "$sentinel_pid"; then
-            kill -KILL -- "-$pid" 2>/dev/null || true
-            log "WARN" "Tool ${tool_name} ignored SIGTERM; process group killed"
-        fi
+        _mcp_term_group_with_grace "$pid" "$sentinel_pid" "$tool_name"
     fi
     # Reaped once, after the last signal: the status reflects the signal,
     # which is what a cancellation is expected to look like.
@@ -1662,13 +1712,8 @@ _teardown_tool_call() {
 process_request() {
     local request="$1"
 
-    if [[ "${_MCP_IN_SERVER_LOOP:-0}" == "1" && -n "${_MCP_LIFELINE_FD:-}" ]]; then
-        exec {_MCP_LIFELINE_FD}>&-
-        _MCP_LIFELINE_FD=""
-    fi
-    if [[ "${_MCP_IN_SERVER_LOOP:-0}" == "1" && -n "${_MCP_PROTOCOL_FD:-}" ]]; then
-        exec {_MCP_PROTOCOL_FD}>&-
-        _MCP_PROTOCOL_FD=""
+    if [[ "${_MCP_IN_SERVER_LOOP:-0}" == "1" ]]; then
+        _mcp_close_protocol_fds
     fi
 
     # Parse gate: exactly one JSON document, of any type. `jq -e '.'` accepted a
@@ -1907,24 +1952,16 @@ _server_teardown() {
     # behaviour.
     if [[ -n "${inflight_pid}" && "${inflight_pid}" != "-" ]] \
         && kill -0 -- "-${inflight_pid}" 2>/dev/null; then
-        _run_cancel_hook "${inflight_tool}" "" "${inflight_output}"
+        # The cancel hook is handed the checked root, so a record naming a path
+        # outside a call root runs it with MCP_CALL_TMPDIR unset.
+        _run_cancel_hook "${inflight_tool}" "" "${inflight_root}" "${inflight_output}"
         # The sentinel this call's wrapper recorded in the call root is left
         # out of the group's liveness exactly as in _teardown_tool_call: it
         # ignores TERM and waits on the lifeline, so counting it would hold this
         # teardown for the whole grace on every shutdown.
         local inflight_sentinel
         inflight_sentinel="$(_sentinel_pid_for "${inflight_sentinel_file}")"
-        kill -TERM -- "-${inflight_pid}" 2>/dev/null || true
-        local waited=0
-        while _tool_group_has_live_member "${inflight_pid}" "${inflight_sentinel}" \
-            && [[ $waited -lt $((_MCP_CANCEL_GRACE_SECONDS * 10)) ]]; do
-            sleep 0.1
-            waited=$((waited + 1))
-        done
-        if _tool_group_has_live_member "${inflight_pid}" "${inflight_sentinel}"; then
-            kill -KILL -- "-${inflight_pid}" 2>/dev/null || true
-            log "WARN" "Tool ${inflight_tool} ignored SIGTERM; process group killed"
-        fi
+        _mcp_term_group_with_grace "${inflight_pid}" "${inflight_sentinel}" "${inflight_tool}"
         log "INFO" "Stopped in-flight tool ${inflight_tool} (group ${inflight_pid}) on shutdown"
     fi
 
@@ -1965,17 +2002,8 @@ _server_teardown() {
         _MCP_PARTIAL_FILE=""
     fi
     # Dropping the last writer is what releases a sentinel still waiting; the
-    # group already killed above is the normal way out. The variable is cleared
-    # with the descriptor so a second teardown cannot close a number the shell
-    # has since given to something else.
-    if [[ -n "${_MCP_LIFELINE_FD:-}" ]]; then
-        exec {_MCP_LIFELINE_FD}>&-
-        _MCP_LIFELINE_FD=""
-    fi
-    if [[ -n "${_MCP_PROTOCOL_FD:-}" ]]; then
-        exec {_MCP_PROTOCOL_FD}>&-
-        _MCP_PROTOCOL_FD=""
-    fi
+    # group already killed above is the normal way out.
+    _mcp_close_protocol_fds
     if [[ -n "${_MCP_LIFELINE_DIR:-}" ]]; then
         rm -rf -- "${_MCP_LIFELINE_DIR}"
         _MCP_LIFELINE_DIR=""
@@ -1995,8 +2023,6 @@ _server_teardown() {
     # time. docs/architecture.md §Shutdown.
     if [[ -n "${_MCP_CHAINED_EXIT_TRAP:-}" ]]; then
         local chained_pid=""
-        local chained_waited=0
-        local chained_status=0
         local chained_monitor_was_enabled=0
         if [[ -o monitor ]]; then
             chained_monitor_was_enabled=1
@@ -2009,22 +2035,7 @@ _server_teardown() {
         else
             set +m
         fi
-        while kill -0 "$chained_pid" 2>/dev/null \
-            && [[ $chained_waited -lt $((_MCP_CANCEL_GRACE_SECONDS * 10)) ]]; do
-            sleep 0.1
-            chained_waited=$((chained_waited + 1))
-        done
-        if kill -0 "$chained_pid" 2>/dev/null; then
-            kill -KILL -- "-$chained_pid" 2>/dev/null || true
-            wait "$chained_pid" || true
-            log "WARN" "Chained caller EXIT trap did not finish within ${_MCP_CANCEL_GRACE_SECONDS}s; killed"
-        else
-            wait "$chained_pid" || chained_status=$?
-            if [[ $chained_status -ne 0 ]]; then
-                log "WARN" "Chained caller EXIT trap failed with status ${chained_status}"
-            fi
-            _kill_tool_group "$chained_pid" "" ""
-        fi
+        _mcp_reap_with_grace "$chained_pid" "Chained caller EXIT trap" "failed"
         _MCP_CHAINED_EXIT_TRAP=""
     fi
 

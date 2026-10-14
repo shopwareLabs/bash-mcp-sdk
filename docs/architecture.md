@@ -156,7 +156,7 @@ The sentinel is left out of that count. It waits on the lifeline rather than on 
 
 A `ps` that fails is unknown liveness, not an empty group. The unknown case degrades to `kill -0` on the whole group, which counts the sentinel and costs the full grace. Read as empty it would end the grace loop immediately and skip the SIGKILL, leaving a TERM-immune tool alive. The degraded path delays a kill rather than dropping one.
 
-`_run_cancel_hook` returns at once when no shell function `tool_<name>_cancel` is defined. It tests with `declare -F`, so an executable of that name on `PATH` is never run as a hook. Otherwise it runs the hook in a background group of its own, with stdin `/dev/null` and its output discarded. Its third argument is the call's output file, whose directory is the call root, and it exports that root's `tmp` to the hook as `MCP_CALL_TMPDIR`. With no output path it unsets the variable instead, so a hook never sees an empty value. Both callers run it before the group is signalled and before the call root is removed. A hook still alive after the grace is SIGKILLed by group, and the kill is logged. A hook that exits non-zero is logged too, and neither outcome fails the call.
+`_run_cancel_hook` returns at once when no shell function `tool_<name>_cancel` is defined. It tests with `declare -F`, so an executable of that name on `PATH` is never run as a hook. Otherwise it runs the hook in a background group of its own, with stdin `/dev/null` and its output discarded. Its third argument is the call root, which each caller derives from the call's output path and checks, and it exports that root's `tmp` to the hook as `MCP_CALL_TMPDIR`. A caller whose output path names no call root passes an empty root, and the hook then runs with the variable unset, so it never sees an empty value. The fourth argument is that output path: with a hook defined, a non-empty path and an empty root, `_run_cancel_hook` logs the refusal with the note that the hook runs with the variable unset. `_teardown_tool_call` also logs its own refusal for such a path whether or not a hook is defined. Both callers run it before the group is signalled and before the call root is removed. A hook still alive after the grace is SIGKILLed by group, and the kill is logged. A hook that exits non-zero is logged too, and neither outcome fails the call.
 
 No tombstone is written for the hook's group. The record names the call's group, which is still live at that point and has to stay named.
 
@@ -216,7 +216,7 @@ The branch also sets `_MCP_EOF_DRAIN`. `handle_tools_call` then touches the shut
 | A process group is signalled only while it still holds a live member | `_kill_tool_group`, `_tool_group_has_live_member` | §The in-flight record |
 | A cancelled call gets no response for its id | `_await_tool_call` | §Cancellation |
 | A cancellation stops only the call whose id it names | `_await_tool_call` | §Cancellation |
-| A wedged tool or cancel hook cannot wedge the server | `_teardown_tool_call`, `_run_cancel_hook` | §Cancellation |
+| A wedged tool or cancel hook cannot wedge the server | `_mcp_term_group_with_grace`, `_mcp_reap_with_grace` | §Cancellation |
 | A teardown pass runs alone and always finishes | `_server_teardown` | §Shutdown |
 | A server that goes down on a trappable signal dies by that signal | `_mcp_teardown_on_signal` | §Shutdown |
 | A line the client wrote in pieces is dispatched as the client wrote it | `_await_tool_call`, `run_mcp_server` | §Partial-line handoff |
