@@ -130,6 +130,16 @@ Consumers copy `lib/mcpserver_core.sh` into their own tree and pin the release t
 
 Why step 4 runs in CI rather than in Renovate: [Keeping the vendored copy current](./docs/server-contract.md#keeping-the-vendored-copy-current).
 
+## 🧩 Used by
+
+| Project | MCP servers built on the SDK |
+|---|---|
+| [shopwareLabs/ai-coding-tools](https://github.com/shopwareLabs/ai-coding-tools) | Shopware development tooling for PHP, admin and storefront (PHPStan, PHPUnit, ESLint, Jest, Vitest), environment lifecycle, test-writing rules |
+| [it-bens-ai/clipboard-agent-tools](https://github.com/it-bens-ai/clipboard-agent-tools) | Clipboard copy for AI coding agents, with native and SSH backends |
+| [shopwareLabs/github-agent-tools](https://github.com/shopwareLabs/github-agent-tools) | GitHub CLI access for AI coding agents, as a read server and an opt-in write server |
+
+Each project vendors `lib/mcpserver_core.sh` at a pinned tagged release. To list your project, open a PR that adds a row.
+
 ## 🧪 Testing
 
 ```bash
